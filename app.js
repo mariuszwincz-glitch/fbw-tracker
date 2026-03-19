@@ -1,4 +1,5 @@
-// MOSQUITO BOOSTER – Main Application
+// MOSQUITO BOOSTER – Main Application v2.0
+// Smart Training Engine with RIR, Readiness, Microcycles
 (async function() {
   await DB.open();
   await seedDatabase();
@@ -14,27 +15,25 @@
   let chartExercise = null;
   let toastTimeout = null;
   let editingSession = null;
-  let swapModalExIdx = null; // which exercise is being swapped
-  let workoutSummaryData = null; // data for post-workout summary
+  let swapModalExIdx = null;
+  let workoutSummaryData = null;
+  let preWorkoutData = null; // readiness check data
+  let setRestTimes = []; // auto-tracked rest between sets
+  let lastSetTime = null; // timestamp of last completed set
 
   const app = document.getElementById('app');
 
   // Mosquito SVG icon (inline)
   const MOSQUITO_SVG = `<svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
     <g transform="translate(50,50)">
-      <!-- body -->
       <ellipse cx="0" cy="8" rx="6" ry="18" fill="currentColor" opacity="0.9"/>
       <ellipse cx="0" cy="-8" rx="4" ry="6" fill="currentColor" opacity="0.85"/>
       <circle cx="0" cy="-16" r="4.5" fill="currentColor" opacity="0.9"/>
-      <!-- proboscis -->
       <line x1="0" y1="-20" x2="0" y2="-36" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-      <!-- antennae -->
       <line x1="-2" y1="-18" x2="-10" y2="-32" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
       <line x1="2" y1="-18" x2="10" y2="-32" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
-      <!-- wings -->
       <ellipse cx="-16" cy="-4" rx="14" ry="5" fill="currentColor" opacity="0.25" transform="rotate(-15)"/>
       <ellipse cx="16" cy="-4" rx="14" ry="5" fill="currentColor" opacity="0.25" transform="rotate(15)"/>
-      <!-- legs -->
       <line x1="-5" y1="0" x2="-20" y2="-10" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
       <line x1="5" y1="0" x2="20" y2="-10" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
       <line x1="-5" y1="6" x2="-22" y2="4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
@@ -56,7 +55,7 @@
   const SWAP_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/></svg>`;
 
   function renderNav() {
-    if (activeSession) return '';
+    if (activeSession || currentScreen === 'readiness') return '';
     return `<nav class="bottom-nav">${NAV_ITEMS.map(n =>
       `<button class="nav-item ${currentScreen === n.id ? 'active' : ''}" data-nav="${n.id}">${n.icon}<span>${n.label}</span></button>`
     ).join('')}</nav>`;
@@ -94,10 +93,11 @@
     const sessions = await DB.getAll('sessions');
     sessions.sort((a, b) => new Date(a.date) - new Date(b.date));
     const groups = [];
-    for (const s of sessions.slice(-limit)) {
+    for (const s of sessions.slice(-limit * 2)) {
       const sets = await DB.getAllByIndex('sessionSets', 'sessionId', s.id);
       const exSets = sets.filter(st => st.exerciseId === exerciseId);
       if (exSets.length > 0) groups.push(exSets);
+      if (groups.length >= limit) break;
     }
     return groups;
   }
@@ -185,6 +185,7 @@
     let html = '';
     switch (currentScreen) {
       case 'dashboard': html = await renderDashboard(); break;
+      case 'readiness': html = renderReadinessCheck(); break;
       case 'workout': html = await renderWorkout(); break;
       case 'history': html = await renderHistory(); break;
       case 'history-detail': html = await renderHistoryDetail(); break;
@@ -208,55 +209,90 @@
     bindEvents();
   }
 
-  // ---- DASHBOARD ----
+  // ═══════════════════════════════════════════════════════════════
+  // DASHBOARD
+  // ═══════════════════════════════════════════════════════════════
   async function renderDashboard() {
     const plan = await DB.getAll('plan');
     const sessions = await getLastSessions(1);
     const lastSession = sessions[0];
     const dietEntries = await getTodayDiet();
     const dietGoal = await getDietGoal();
+    const mcInfo = await getMicrocycleInfo();
+    const muscleVol = await getWeeklyMuscleVolume();
 
     const totalProtein = dietEntries.reduce((s, e) => s + (e.protein || 0), 0);
     const proteinTarget = dietGoal.protein[1];
     const proteinPct = Math.min(100, Math.round((totalProtein / proteinTarget) * 100));
+
+    // Microcycle badge
+    const mcBadge = mcInfo.isDeload
+      ? `<div class="microcycle-badge deload"><span>&#x1F4A4;</span> TYDZIEŃ DELOAD &middot; -15% ciężaru</div>`
+      : `<div class="microcycle-badge"><span>&#x1F4AA;</span> ${mcInfo.weekLabel} &middot; ${mcInfo.sessionsThisWeek}/3 treningów</div>`;
 
     let lastSummary = '';
     if (lastSession) {
       const sets = await DB.getAllByIndex('sessionSets', 'sessionId', lastSession.id);
       const totalSets = sets.length;
       const totalVolume = sets.reduce((s, st) => s + (st.weight || 0) * (st.reps || 0), 0);
+      const avgRir = sets.filter(s => s.rir != null).map(s => s.rir);
+      const rirDisplay = avgRir.length > 0 ? (avgRir.reduce((a, b) => a + b, 0) / avgRir.length).toFixed(1) : '-';
       lastSummary = `
         <div class="card">
           <div class="card-title">Ostatnia sesja</div>
           <div class="last-session-date">${formatDate(lastSession.date)}</div>
           <div class="last-session-summary">
             <div class="stat-item"><div class="stat-value">${totalSets}</div><div class="stat-label">Serii</div></div>
-            <div class="stat-item"><div class="stat-value">${Math.round(totalVolume)}</div><div class="stat-label">Wolumen kg</div></div>
+            <div class="stat-item"><div class="stat-value">${Math.round(totalVolume)}</div><div class="stat-label">Wolumen</div></div>
+            <div class="stat-item"><div class="stat-value">${rirDisplay}</div><div class="stat-label">Śr. RIR</div></div>
             <div class="stat-item"><div class="stat-value">${lastSession.duration ? Math.round(lastSession.duration / 60) + 'm' : '-'}</div><div class="stat-label">Czas</div></div>
           </div>
         </div>`;
     }
 
-    // Check for progressions (only for exercises in the plan)
+    // Weekly muscle volume
+    let volumeHtml = '';
+    const muscleNames = Object.keys(muscleVol.volume);
+    if (muscleNames.length > 0) {
+      const maxVol = Math.max(...Object.values(muscleVol.volume));
+      volumeHtml = `<div class="card">
+        <div class="card-title">Objętość tygodniowa</div>`;
+      for (const muscle of muscleNames) {
+        const vol = muscleVol.volume[muscle];
+        const sets = muscleVol.sets[muscle] || 0;
+        const pct = maxVol > 0 ? Math.round((vol / maxVol) * 100) : 0;
+        volumeHtml += `<div class="volume-row">
+          <div class="volume-label">
+            <span class="muscle-badge" style="background:${MUSCLE_COLORS[muscle] || '#666'};font-size:9px">${muscle}</span>
+            <span class="volume-sets">${sets} serii</span>
+          </div>
+          <div class="progress-bar" style="flex:1"><div class="progress-fill" style="width:${pct}%;background:${MUSCLE_COLORS[muscle] || '#666'}"></div></div>
+          <span class="volume-value">${Math.round(vol)}kg</span>
+        </div>`;
+      }
+      volumeHtml += `</div>`;
+    }
+
+    // Progressions
     let progressionHtml = '';
     const plan2 = await DB.getAll('plan');
     const planExIds = plan2.map(p => p.exerciseId);
     const exercises = await DB.getAll('exercises');
     for (const ex of exercises) {
-      if (!planExIds.includes(ex.id)) continue; // only check plan exercises
-      const groups = await getSessionSetsGrouped(ex.id, 5);
-      const prog = checkProgression(ex.name, groups);
-      if (prog && prog.suggest) {
-        const iconMap = { up: '&#x2191;', down: '&#x2193;', stagnation: '&#x26A0;', fatigue: '&#x23F3;' };
-        const colorMap = { up: 'rgba(34,197,94,0.15)', down: 'rgba(239,68,68,0.15)', stagnation: 'rgba(245,158,11,0.15)', fatigue: 'rgba(100,210,255,0.15)' };
+      if (!planExIds.includes(ex.id)) continue;
+      const history = await analyzeExerciseHistory(ex.id, 5);
+      const suggestion = suggestWeight(ex.name, history);
+      if (suggestion && suggestion.direction !== 'maintain') {
+        const iconMap = { up: '&#x2191;', down: '&#x2193;', stagnation: '&#x26A0;', fatigue: '&#x23F3;', reps_first: '&#x1F4AA;' };
+        const colorMap = { up: 'rgba(34,197,94,0.15)', down: 'rgba(239,68,68,0.15)', stagnation: 'rgba(245,158,11,0.15)', fatigue: 'rgba(100,210,255,0.15)', reps_first: 'rgba(168,85,247,0.15)' };
         progressionHtml += `
           <div class="progression-card">
-            <div class="progression-icon" style="background:${colorMap[prog.direction] || colorMap.up}">
-              ${iconMap[prog.direction] || '&#x2191;'}
+            <div class="progression-icon" style="background:${colorMap[suggestion.direction] || colorMap.up}">
+              ${iconMap[suggestion.direction] || '&#x2191;'}
             </div>
             <div class="progression-info">
               <div class="progression-name">${ex.name}</div>
-              <div class="progression-msg">${prog.message}</div>
+              <div class="progression-msg">${suggestion.reason}</div>
             </div>
           </div>`;
       }
@@ -268,7 +304,8 @@
         <h2>MOSQUITO BOOSTER</h2>
         <div class="tagline">${plan.length} cwiczen w planie</div>
       </div>
-      <button class="start-btn" data-action="start-workout">
+      ${mcBadge}
+      <button class="start-btn" data-action="start-readiness">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
         Rozpocznij trening
       </button>
@@ -283,6 +320,7 @@
       </div>
       ${progressionHtml}
       ${lastSummary}
+      ${volumeHtml}
       <div class="card">
         <div class="card-title">Dzisiejszy plan</div>
         ${await renderTodayPlan()}
@@ -294,50 +332,173 @@
     plan.sort((a, b) => a.order - b.order);
     let html = '';
     for (const p of plan) {
+      const history = await analyzeExerciseHistory(p.exerciseId, 3);
+      const suggestion = suggestWeight(p.exerciseName, history);
       const prevSets = await getPrevSessionSets(p.exerciseId);
       const maxSet = prevSets.find(s => s.type === 'max');
       const workingSet = prevSets.find(s => s.type === 'working');
       const ref = maxSet || workingSet;
+
+      let suggestHint = '';
+      if (suggestion && suggestion.direction === 'up') {
+        suggestHint = `<span class="plan-suggest up">&#x2191; ${suggestion.weight}kg</span>`;
+      } else if (suggestion && suggestion.direction === 'down') {
+        suggestHint = `<span class="plan-suggest down">&#x2193; ${suggestion.weight}kg</span>`;
+      }
+
       html += `<div class="plan-item">
         <span class="muscle-badge" style="background:${MUSCLE_COLORS[p.muscle] || '#666'}">${p.muscle}</span>
         <span class="plan-item-name">${p.exerciseName}</span>
-        <span class="plan-item-weight">${ref ? ref.weight + 'kg x' + ref.reps : p.sets[p.sets.length-1].weight + 'kg'}</span>
+        ${suggestHint}
+        <span class="plan-item-weight">${ref ? ref.weight + 'kg' : p.sets[p.sets.length-1].weight + 'kg'}</span>
       </div>`;
     }
     return html;
   }
 
-  // ---- ACTIVE WORKOUT ----
+  // ═══════════════════════════════════════════════════════════════
+  // PRE-WORKOUT READINESS CHECK
+  // Pytamy: sen, stres, bolesnosc miesni -> readiness score
+  // ═══════════════════════════════════════════════════════════════
+  function renderReadinessCheck() {
+    return `
+      <div class="readiness-screen">
+        <div class="readiness-header">
+          <button class="back-btn" data-action="back-dashboard">&#x2190;</button>
+          <h2>Jak się dziś czujesz?</h2>
+          <p class="readiness-subtitle">Dostosujemy trening do Twojej formy</p>
+        </div>
+
+        <div class="readiness-card">
+          <div class="readiness-label">&#x1F634; Sen (ostatnia noc)</div>
+          <div class="readiness-scale" data-field="sleep">
+            <button class="scale-btn ${preWorkoutData?.sleep === 1 ? 'active' : ''}" data-value="1">1<span>Fatalny</span></button>
+            <button class="scale-btn ${preWorkoutData?.sleep === 2 ? 'active' : ''}" data-value="2">2<span>Slaby</span></button>
+            <button class="scale-btn ${preWorkoutData?.sleep === 3 ? 'active' : ''}" data-value="3">3<span>OK</span></button>
+            <button class="scale-btn ${preWorkoutData?.sleep === 4 ? 'active' : ''}" data-value="4">4<span>Dobry</span></button>
+            <button class="scale-btn ${preWorkoutData?.sleep === 5 ? 'active' : ''}" data-value="5">5<span>Super</span></button>
+          </div>
+        </div>
+
+        <div class="readiness-card">
+          <div class="readiness-label">&#x1F4A5; Stres</div>
+          <div class="readiness-scale" data-field="stress">
+            <button class="scale-btn ${preWorkoutData?.stress === 1 ? 'active' : ''}" data-value="1">1<span>Zero</span></button>
+            <button class="scale-btn ${preWorkoutData?.stress === 2 ? 'active' : ''}" data-value="2">2<span>Lekki</span></button>
+            <button class="scale-btn ${preWorkoutData?.stress === 3 ? 'active' : ''}" data-value="3">3<span>Sredni</span></button>
+            <button class="scale-btn ${preWorkoutData?.stress === 4 ? 'active' : ''}" data-value="4">4<span>Duzy</span></button>
+            <button class="scale-btn ${preWorkoutData?.stress === 5 ? 'active' : ''}" data-value="5">5<span>Max</span></button>
+          </div>
+        </div>
+
+        <div class="readiness-card">
+          <div class="readiness-label">&#x1F525; Bolesnosc miesni (DOMS)</div>
+          <div class="readiness-scale" data-field="soreness">
+            <button class="scale-btn ${preWorkoutData?.soreness === 1 ? 'active' : ''}" data-value="1">1<span>Brak</span></button>
+            <button class="scale-btn ${preWorkoutData?.soreness === 2 ? 'active' : ''}" data-value="2">2<span>Lekka</span></button>
+            <button class="scale-btn ${preWorkoutData?.soreness === 3 ? 'active' : ''}" data-value="3">3<span>Srednia</span></button>
+            <button class="scale-btn ${preWorkoutData?.soreness === 4 ? 'active' : ''}" data-value="4">4<span>Duza</span></button>
+            <button class="scale-btn ${preWorkoutData?.soreness === 5 ? 'active' : ''}" data-value="5">5<span>Ciężka</span></button>
+          </div>
+        </div>
+
+        <div class="readiness-card">
+          <div class="readiness-label">&#x1F4DD; Notatki (opcjonalnie)</div>
+          <textarea class="note-input" rows="2" placeholder="Np. mało jadłem, jestem po chorobie..." id="readiness-notes">${preWorkoutData?.notes || ''}</textarea>
+        </div>
+
+        ${preWorkoutData?.sleep ? (() => {
+          const score = calculateReadiness(preWorkoutData);
+          const info = getReadinessLabel(score);
+          return `<div class="readiness-result" style="border-color: ${info.color}40">
+            <div class="readiness-score" style="color: ${info.color}">${info.emoji} Gotowość: ${score}/5 – ${info.text}</div>
+            ${score <= 2 ? '<div class="readiness-hint">Zmniejszymy ciężary o ~5% na dziś</div>' : ''}
+            ${score >= 5 ? '<div class="readiness-hint" style="color:var(--green)">Daj z siebie wszystko!</div>' : ''}
+          </div>`;
+        })() : ''}
+
+        <button class="start-btn" data-action="start-workout" style="margin-top:8px">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          ${preWorkoutData?.sleep ? 'Zaczynamy!' : 'Pomiń i zacznij'}
+        </button>
+      </div>`;
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // ACTIVE WORKOUT
+  // ═══════════════════════════════════════════════════════════════
   async function startWorkout() {
     const plan = await DB.getAll('plan');
     plan.sort((a, b) => a.order - b.order);
     timerTotal = await getRestTime();
+    const mcInfo = await getMicrocycleInfo();
+    const deloadMod = getDeloadModifier(mcInfo.isDeload);
+    const readiness = preWorkoutData ? calculateReadiness(preWorkoutData) : 3;
+
+    // Save body stats
+    if (preWorkoutData && preWorkoutData.sleep) {
+      await DB.add('bodyStats', {
+        date: today(),
+        sleep: preWorkoutData.sleep,
+        stress: preWorkoutData.stress,
+        soreness: preWorkoutData.soreness,
+        notes: preWorkoutData.notes || '',
+        readiness
+      });
+    }
 
     const sessionId = await DB.add('sessions', {
       date: today(),
       startTime: Date.now(),
       duration: null,
-      completed: false
+      completed: false,
+      readiness,
+      isDeload: mcInfo.isDeload
     });
 
     const exerciseData = [];
     for (const p of plan) {
       const prevSets = await getPrevSessionSets(p.exerciseId);
+      const history = await analyzeExerciseHistory(p.exerciseId, 3);
+      const suggestion = suggestWeight(p.exerciseName, history, readiness);
+
       const sets = p.sets.map((s, i) => {
         const prev = prevSets[i];
+        let weight = prev ? prev.weight : s.weight;
+        let reps = prev ? prev.reps : s.reps;
+
+        // Apply suggestion to working/max sets
+        if (suggestion && (s.type === 'working' || s.type === 'max')) {
+          if (suggestion.direction === 'up') {
+            weight = suggestion.weight;
+          } else if (suggestion.direction === 'down') {
+            weight = suggestion.weight;
+          }
+        }
+
+        // Apply deload modifier
+        if (mcInfo.isDeload && (s.type === 'working' || s.type === 'max')) {
+          weight = Math.round(weight * deloadMod / 2.5) * 2.5;
+        }
+
         return {
           ...s,
           index: i,
-          actualWeight: prev ? prev.weight : s.weight,
-          actualReps: prev ? prev.reps : s.reps,
-          completed: false
+          actualWeight: weight,
+          actualReps: reps,
+          rir: null,
+          completed: false,
+          restTime: null
         };
       });
+
       exerciseData.push({
         exerciseId: p.exerciseId,
         exerciseName: p.exerciseName,
         muscle: p.muscle,
-        sets
+        sets,
+        suggestion: suggestion ? suggestion.reason : null,
+        note: ''
       });
     }
 
@@ -345,9 +506,13 @@
       id: sessionId,
       exercises: exerciseData,
       currentExercise: 0,
-      startTime: Date.now()
+      startTime: Date.now(),
+      readiness,
+      isDeload: mcInfo.isDeload
     };
 
+    lastSetTime = null;
+    setRestTimes = [];
     currentScreen = 'workout';
     render();
   }
@@ -356,13 +521,13 @@
     if (!activeSession) return '<div class="empty-state">Brak aktywnej sesji</div>';
 
     const ex = activeSession.exercises;
-    const completedExCount = ex.filter(e => e.sets.every(s => s.completed)).length;
-    const totalSets = ex.reduce((a, e) => a + e.sets.length, 0);
     const completedSets = ex.reduce((a, e) => a + e.sets.filter(s => s.completed).length, 0);
+    const totalSets = ex.reduce((a, e) => a + e.sets.length, 0);
 
     let html = `<div class="workout-header">
       <button class="back-btn" data-action="end-workout">&#x2715; Zakoncz</button>
       <div class="workout-progress">${completedSets}/${totalSets} serii</div>
+      ${activeSession.isDeload ? '<span class="deload-badge">DELOAD</span>' : ''}
     </div>`;
 
     for (let ei = 0; ei < ex.length; ei++) {
@@ -377,6 +542,16 @@
           ${allDone ? '<span style="color:var(--green);font-weight:700">&#x2713;</span>' : ''}
           <button class="swap-btn" data-action="open-swap" data-ex="${ei}">${SWAP_ICON} Zamien</button>
         </div>`;
+
+      // Smart suggestion tooltip
+      if (e.suggestion && !allDone) {
+        html += `<div class="suggestion-bar">${e.suggestion}</div>`;
+      }
+
+      // Set header row
+      html += `<div class="set-header-row">
+        <div>Seria</div><div>Plan</div><div>Ciężar</div><div>Powt.</div><div>RIR</div><div></div>
+      </div>`;
 
       for (let si = 0; si < e.sets.length; si++) {
         const s = e.sets[si];
@@ -404,18 +579,31 @@
           <input class="set-input" type="number" inputmode="numeric" placeholder="${s.reps || '?'}"
             value="${s.actualReps || ''}" data-ex="${ei}" data-set="${si}" data-field="reps"
             ${s.completed ? 'disabled' : ''}>
+          <select class="rir-select ${s.completed ? 'done' : ''}" data-ex="${ei}" data-set="${si}" data-field="rir" ${s.completed ? 'disabled' : ''}>
+            <option value="" ${s.rir == null ? 'selected' : ''}>-</option>
+            <option value="0" ${s.rir === 0 ? 'selected' : ''}>0</option>
+            <option value="1" ${s.rir === 1 ? 'selected' : ''}>1</option>
+            <option value="2" ${s.rir === 2 ? 'selected' : ''}>2</option>
+            <option value="3" ${s.rir === 3 ? 'selected' : ''}>3</option>
+            <option value="4" ${s.rir === 4 ? 'selected' : ''}>4+</option>
+          </select>
           <button class="set-check ${s.completed ? 'done' : ''}" data-action="complete-set" data-ex="${ei}" data-set="${si}">
             ${s.completed ? '&#x2713;' : '&#x25CB;'}
           </button>
         </div>`;
 
         if (prev && !s.completed) {
-          html += `<div class="prev-result">Poprzednio: ${prev.weight}kg x ${prev.reps || '-'} ${comparison}</div>`;
+          html += `<div class="prev-result">Poprzednio: ${prev.weight}kg x ${prev.reps || '-'} ${prev.rir != null ? '(RIR ' + prev.rir + ')' : ''} ${comparison}</div>`;
+        }
+
+        // Show rest time if tracked
+        if (s.completed && s.restTime) {
+          html += `<div class="rest-time-display">&#x23F1; Przerwa: ${Math.round(s.restTime)}s</div>`;
         }
       }
 
       html += `<div class="note-area">
-        <textarea class="note-input" rows="1" placeholder="Notatka..." data-ex="${ei}" data-note="true">${e.note || ''}</textarea>
+        <textarea class="note-input" rows="1" placeholder="Notatka (forma, technika, kontuzja...)" data-ex="${ei}" data-note="true">${e.note || ''}</textarea>
       </div>`;
 
       html += `</div>`;
@@ -431,10 +619,20 @@
 
     const weightInput = document.querySelector(`input[data-ex="${exIdx}"][data-set="${setIdx}"][data-field="weight"]`);
     const repsInput = document.querySelector(`input[data-ex="${exIdx}"][data-set="${setIdx}"][data-field="reps"]`);
+    const rirSelect = document.querySelector(`select[data-ex="${exIdx}"][data-set="${setIdx}"][data-field="rir"]`);
 
     s.actualWeight = parseFloat(weightInput?.value) || s.weight;
     s.actualReps = parseInt(repsInput?.value) || s.reps || 0;
+    s.rir = rirSelect?.value !== '' ? parseInt(rirSelect.value) : null;
     s.completed = true;
+
+    // Track rest time (time since last completed set)
+    const now = Date.now();
+    if (lastSetTime) {
+      s.restTime = Math.round((now - lastSetTime) / 1000);
+      setRestTimes.push(s.restTime);
+    }
+    lastSetTime = now;
 
     await DB.add('sessionSets', {
       sessionId: activeSession.id,
@@ -444,6 +642,8 @@
       setIndex: setIdx,
       weight: s.actualWeight,
       reps: s.actualReps,
+      rir: s.rir,
+      restTime: s.restTime || null,
       plannedWeight: s.weight,
       plannedReps: s.reps
     });
@@ -487,12 +687,9 @@
     el.innerHTML = modalHtml;
     document.body.appendChild(el.firstChild);
 
-    // Bind swap modal events
     document.querySelectorAll('[data-action="swap-to"]').forEach(btn => {
       btn.addEventListener('click', async () => {
-        const exId = parseInt(btn.dataset.exId);
-        const exName = btn.dataset.exName;
-        await doSwap(exId, exName);
+        await doSwap(parseInt(btn.dataset.exId), btn.dataset.exName);
       });
     });
 
@@ -500,7 +697,6 @@
       btn.addEventListener('click', async () => {
         const customName = document.getElementById('custom-exercise-name')?.value?.trim();
         if (!customName) return;
-        // Add to DB if new
         const allEx = await DB.getAll('exercises');
         let existing = allEx.find(e => e.name === customName);
         if (!existing) {
@@ -526,14 +722,15 @@
     const exIdx = swapModalExIdx;
     const oldEx = activeSession.exercises[exIdx];
 
-    // Load prev sets for the new exercise
     const prevSets = await getPrevSessionSets(newExId);
-
-    // Update the exercise in active session
     oldEx.exerciseId = newExId;
     oldEx.exerciseName = newExName;
 
-    // Update non-completed sets with new exercise's previous data
+    // Recalculate suggestion for new exercise
+    const history = await analyzeExerciseHistory(newExId, 3);
+    const suggestion = suggestWeight(newExName, history, activeSession.readiness);
+    oldEx.suggestion = suggestion ? suggestion.reason : null;
+
     for (let i = 0; i < oldEx.sets.length; i++) {
       if (!oldEx.sets[i].completed) {
         const prev = prevSets[i];
@@ -544,21 +741,20 @@
       }
     }
 
-    // Close modal
     const overlay = document.querySelector('.swap-modal-overlay');
     if (overlay) overlay.remove();
     swapModalExIdx = null;
-
     showToast(`Zamieniono na: ${newExName}`);
     render();
   }
 
-  // ---- END WORKOUT & SUMMARY ----
+  // ═══════════════════════════════════════════════════════════════
+  // END WORKOUT & SUMMARY
+  // ═══════════════════════════════════════════════════════════════
   async function endWorkout() {
     stopTimer();
     const duration = Math.round((Date.now() - activeSession.startTime) / 1000);
 
-    // Save notes
     for (let i = 0; i < activeSession.exercises.length; i++) {
       const noteEl = document.querySelector(`textarea[data-ex="${i}"]`);
       if (noteEl && noteEl.value.trim()) {
@@ -570,20 +766,17 @@
       }
     }
 
-    // Update session
     const session = await DB.get('sessions', activeSession.id);
     session.duration = duration;
     session.completed = true;
     await DB.put('sessions', session);
 
-    // Build summary data
     await buildWorkoutSummary(session);
 
     activeSession = null;
+    preWorkoutData = null;
     currentScreen = 'dashboard';
     render();
-
-    // Show summary overlay
     showSummaryOverlay();
   }
 
@@ -591,7 +784,6 @@
     const sets = await DB.getAllByIndex('sessionSets', 'sessionId', session.id);
     const exercises = await DB.getAll('exercises');
 
-    // Group by exercise
     const grouped = {};
     sets.forEach(s => {
       if (!grouped[s.exerciseName]) grouped[s.exerciseName] = { sets: [], exerciseId: s.exerciseId };
@@ -601,19 +793,20 @@
     const totalVolume = sets.reduce((sum, s) => sum + s.weight * s.reps, 0);
     const totalSets = sets.length;
     const totalReps = sets.reduce((sum, s) => sum + s.reps, 0);
+    const rirs = sets.filter(s => s.rir != null).map(s => s.rir);
+    const avgRir = rirs.length > 0 ? (rirs.reduce((a, b) => a + b, 0) / rirs.length).toFixed(1) : null;
+    const avgRestTime = setRestTimes.length > 0 ? Math.round(setRestTimes.reduce((a, b) => a + b, 0) / setRestTimes.length) : null;
     const musclesWorked = [...new Set(sets.map(s => {
       const ex = exercises.find(e => e.id === s.exerciseId);
       return ex ? ex.muscle : '?';
     }))];
 
-    // Find PRs and insights
     const prs = [];
     const insights = [];
 
     for (const [name, data] of Object.entries(grouped)) {
       const maxSet = data.sets.find(s => s.type === 'max');
 
-      // Compare with previous sessions
       const sessions = await DB.getAll('sessions');
       sessions.sort((a, b) => new Date(b.date) - new Date(a.date));
       let prevSessionSets = [];
@@ -635,7 +828,6 @@
         }
       }
 
-      // Exercise volume
       const exVol = data.sets.reduce((sum, s) => sum + s.weight * s.reps, 0);
       if (prevSessionSets.length > 0) {
         const prevVol = prevSessionSets.reduce((sum, s) => sum + s.weight * s.reps, 0);
@@ -648,27 +840,45 @@
       }
     }
 
-    // Check progressions
+    // Progressions
     const progressions = [];
     for (const [name, data] of Object.entries(grouped)) {
-      const groups = await getSessionSetsGrouped(data.exerciseId, 5);
-      const prog = checkProgression(name, groups);
-      if (prog && prog.suggest) {
-        progressions.push({ name, ...prog });
+      const history = await analyzeExerciseHistory(data.exerciseId, 5);
+      const suggestion = suggestWeight(name, history);
+      if (suggestion && suggestion.direction !== 'maintain') {
+        progressions.push({ name, ...suggestion });
       }
     }
 
-    // Average rest time tip
-    if (session.duration > 0) {
-      const avgSetTime = Math.round(session.duration / totalSets);
-      if (avgSetTime > 240) {
-        insights.push({ icon: '&#x23F1;', text: `Sredni czas na serie: ${Math.round(avgSetTime/60)}min. Mozesz skrocic przerwy?` });
+    // RIR-based insights
+    if (avgRir !== null) {
+      const rirNum = parseFloat(avgRir);
+      if (rirNum <= 0.5) {
+        insights.push({ icon: '&#x26A0;', text: `Średni RIR ${avgRir} = trenujesz do porażki. Zostaw 1-2 RIR dla bezpiecznej progresji.` });
+      } else if (rirNum >= 3) {
+        insights.push({ icon: '&#x1F4AA;', text: `Średni RIR ${avgRir} = masz jeszcze dużo rezerwy. Następnym razem zwiększ ciężar lub powtórzenia.` });
+      } else {
+        insights.push({ icon: '&#x2705;', text: `Średni RIR ${avgRir} = idealny zakres (1-2). Świetna robota!` });
       }
     }
 
-    // Muscle balance
+    // Rest time insight
+    if (avgRestTime) {
+      if (avgRestTime > 240) {
+        insights.push({ icon: '&#x23F1;', text: `Średnia przerwa: ${Math.round(avgRestTime / 60)}min. Dla hipertrofii optymalnie 2-3 min.` });
+      } else if (avgRestTime < 60) {
+        insights.push({ icon: '&#x23F1;', text: `Średnia przerwa: ${avgRestTime}s. Compound mogą wymagać dłuższych przerw (2-3 min).` });
+      }
+    }
+
     if (musclesWorked.length >= 5) {
-      insights.push({ icon: '&#x2705;', text: `Dobra rownowaga! Trenowales ${musclesWorked.length} grup miesniowych.` });
+      insights.push({ icon: '&#x2705;', text: `Dobra równowaga! ${musclesWorked.length} grup mięśniowych.` });
+    }
+
+    // Microcycle tip
+    const mcInfo = await getMicrocycleInfo();
+    if (mcInfo.week === 3 && mcInfo.sessionsThisWeek >= 3) {
+      insights.push({ icon: '&#x1F4A4;', text: 'Następny tydzień to <strong>DELOAD</strong>. Automatycznie zmniejszymy ciężary o 15%.' });
     }
 
     workoutSummaryData = {
@@ -677,11 +887,14 @@
       totalSets,
       totalReps,
       totalVolume,
+      avgRir,
+      avgRestTime,
       musclesWorked,
       exerciseDetails: grouped,
       prs,
       insights,
-      progressions
+      progressions,
+      readiness: session.readiness
     };
   }
 
@@ -708,25 +921,26 @@
           </div>
           <div class="summary-stat">
             <div class="summary-stat-value">${Math.round(d.totalVolume)}</div>
-            <div class="summary-stat-label">Wolumen kg</div>
+            <div class="summary-stat-label">Wolumen</div>
           </div>
           <div class="summary-stat">
-            <div class="summary-stat-value">${d.musclesWorked.length}</div>
-            <div class="summary-stat-label">Partii</div>
+            <div class="summary-stat-value">${d.avgRir || '-'}</div>
+            <div class="summary-stat-label">Śr. RIR</div>
           </div>
         </div>`;
 
     // Exercise breakdown
     html += `<div class="summary-section">
       <div class="summary-section-title">Cwiczenia</div>`;
-    const allExercises_cached = [];
     for (const [name, data] of Object.entries(d.exerciseDetails)) {
       const maxSet = data.sets.find(s => s.type === 'max');
       const vol = data.sets.reduce((sum, s) => sum + s.weight * s.reps, 0);
+      const exRirs = data.sets.filter(s => s.rir != null).map(s => s.rir);
+      const exAvgRir = exRirs.length > 0 ? (exRirs.reduce((a, b) => a + b, 0) / exRirs.length).toFixed(1) : null;
       html += `<div class="summary-exercise">
         <div class="summary-ex-info">
           <div class="summary-ex-name">${name}</div>
-          <div class="summary-ex-detail">${data.sets.length} serii &middot; ${Math.round(vol)}kg vol${maxSet ? ' &middot; MAX: ' + maxSet.weight + 'kg x' + maxSet.reps : ''}</div>
+          <div class="summary-ex-detail">${data.sets.length} serii &middot; ${Math.round(vol)}kg vol${maxSet ? ' &middot; MAX: ' + maxSet.weight + 'kg x' + maxSet.reps : ''}${exAvgRir ? ' &middot; RIR ' + exAvgRir : ''}</div>
         </div>
       </div>`;
     }
@@ -748,11 +962,12 @@
     // Progressions
     if (d.progressions.length > 0) {
       html += `<div class="summary-section">
-        <div class="summary-section-title">&#x1F4C8; Progresja</div>`;
+        <div class="summary-section-title">&#x1F4C8; Nastepny trening</div>`;
       for (const p of d.progressions) {
+        const dirIcon = { up: '&#x2B06;', down: '&#x2B07;', stagnation: '&#x26A0;', fatigue: '&#x23F3;', reps_first: '&#x1F4AA;' };
         html += `<div class="summary-insight">
-          <div class="summary-insight-icon">${p.direction === 'up' ? '&#x2B06;' : '&#x2B07;'}</div>
-          <div class="summary-insight-text"><strong>${p.name}</strong>: ${p.message}</div>
+          <div class="summary-insight-icon">${dirIcon[p.direction] || '&#x2B06;'}</div>
+          <div class="summary-insight-text"><strong>${p.name}</strong>: ${p.reason}</div>
         </div>`;
       }
       html += `</div>`;
@@ -761,7 +976,7 @@
     // Insights
     if (d.insights.length > 0) {
       html += `<div class="summary-section">
-        <div class="summary-section-title">&#x1F4A1; Co dalej</div>`;
+        <div class="summary-section-title">&#x1F4A1; Analiza</div>`;
       for (const ins of d.insights) {
         html += `<div class="summary-insight">
           <div class="summary-insight-icon">${ins.icon}</div>
@@ -786,7 +1001,9 @@
     });
   }
 
-  // ---- HISTORY ----
+  // ═══════════════════════════════════════════════════════════════
+  // HISTORY
+  // ═══════════════════════════════════════════════════════════════
   async function renderHistory() {
     const sessions = await getLastSessions(50);
     let html = `<div class="header"><h1>Historia</h1></div>`;
@@ -799,10 +1016,12 @@
       const sets = await DB.getAllByIndex('sessionSets', 'sessionId', s.id);
       const exercises = [...new Set(sets.map(st => st.exerciseName))];
       const volume = sets.reduce((sum, st) => sum + st.weight * st.reps, 0);
+      const rirs = sets.filter(st => st.rir != null).map(st => st.rir);
+      const avgRir = rirs.length > 0 ? (rirs.reduce((a, b) => a + b, 0) / rirs.length).toFixed(1) : null;
 
       html += `<div class="session-item" data-action="show-session" data-session-id="${s.id}">
-        <div class="session-date">${formatDate(s.date)}</div>
-        <div class="session-summary">${exercises.length} cwiczen &middot; ${sets.length} serii &middot; ${Math.round(volume)} kg &middot; ${s.duration ? Math.round(s.duration / 60) + ' min' : '-'}</div>
+        <div class="session-date">${formatDate(s.date)} ${s.isDeload ? '<span class="deload-badge" style="font-size:10px">DELOAD</span>' : ''}</div>
+        <div class="session-summary">${exercises.length} cwiczen &middot; ${sets.length} serii &middot; ${Math.round(volume)}kg${avgRir ? ' &middot; RIR ' + avgRir : ''} &middot; ${s.duration ? Math.round(s.duration / 60) + 'min' : '-'}</div>
       </div>`;
     }
     return html;
@@ -831,6 +1050,12 @@
       <button class="btn btn-sm btn-danger" data-action="delete-session" data-session-id="${session.id}" style="flex:1">Usun</button>
     </div>`;
 
+    // Show readiness if available
+    if (session.readiness) {
+      const info = getReadinessLabel(session.readiness);
+      html += `<div style="padding:0 16px 12px;font-size:13px;color:var(--text2)">${info.emoji} Gotowość: ${session.readiness}/5 ${session.isDeload ? '&middot; DELOAD' : ''}</div>`;
+    }
+
     if (editingSession === session.id) {
       for (const [name, exSets] of Object.entries(grouped)) {
         const muscle = allExercises.find(e => e.name === name)?.muscle || '';
@@ -839,9 +1064,11 @@
         for (const s of exSets) {
           html += `<div style="display:flex; gap:8px; align-items:center; padding:6px 0;">
             <span class="set-type" style="color:${SET_TYPES[s.type]?.color || '#666'}; width:30px;">${SET_TYPES[s.type]?.short || '?'}</span>
-            <input class="set-input" type="number" inputmode="decimal" step="0.5" value="${s.weight}" data-edit-set-id="${s.id}" data-edit-field="weight" style="width:80px;">
+            <input class="set-input" type="number" inputmode="decimal" step="0.5" value="${s.weight}" data-edit-set-id="${s.id}" data-edit-field="weight" style="width:70px;">
             <span style="color:var(--text3)">kg x</span>
-            <input class="set-input" type="number" inputmode="numeric" value="${s.reps}" data-edit-set-id="${s.id}" data-edit-field="reps" style="width:80px;">
+            <input class="set-input" type="number" inputmode="numeric" value="${s.reps}" data-edit-set-id="${s.id}" data-edit-field="reps" style="width:60px;">
+            <span style="color:var(--text3)">RIR</span>
+            <input class="set-input" type="number" inputmode="numeric" value="${s.rir != null ? s.rir : ''}" data-edit-set-id="${s.id}" data-edit-field="rir" style="width:50px;">
           </div>`;
         }
         html += `</div>`;
@@ -858,6 +1085,7 @@
             ${exSets.map(s => `<div class="session-set-chip">
               <div style="font-size:10px;color:${SET_TYPES[s.type]?.color || '#666'};font-weight:700">${SET_TYPES[s.type]?.short || '?'}</div>
               <div style="font-weight:700">${s.weight}kg x ${s.reps}</div>
+              ${s.rir != null ? `<div style="font-size:10px;color:var(--text3)">RIR ${s.rir}</div>` : ''}
             </div>`).join('')}
           </div>
         </div>`;
@@ -872,19 +1100,34 @@
     return html;
   }
 
-  // ---- CHARTS ----
+  // ═══════════════════════════════════════════════════════════════
+  // CHARTS
+  // ═══════════════════════════════════════════════════════════════
   async function renderCharts() {
     const exercises = await DB.getAll('exercises');
-    if (!chartExercise && exercises.length > 0) chartExercise = exercises[0].id;
+    const plan = await DB.getAll('plan');
+    const planExIds = plan.map(p => p.exerciseId);
+    // Show plan exercises first, then all
+    const sortedEx = [...exercises].sort((a, b) => {
+      const aInPlan = planExIds.includes(a.id) ? 0 : 1;
+      const bInPlan = planExIds.includes(b.id) ? 0 : 1;
+      return aInPlan - bInPlan;
+    });
+    if (!chartExercise && sortedEx.length > 0) chartExercise = sortedEx[0].id;
 
     let html = `<div class="header"><h1>Wykresy</h1></div>`;
 
     html += `<div class="chart-container">
       <select class="chart-select" data-action="chart-select">
-        ${exercises.map(e => `<option value="${e.id}" ${e.id === chartExercise ? 'selected' : ''}>${e.name}</option>`).join('')}
+        ${sortedEx.map(e => `<option value="${e.id}" ${e.id === chartExercise ? 'selected' : ''}>${e.name} ${planExIds.includes(e.id) ? '★' : ''}</option>`).join('')}
       </select>
       <div class="card-title">Progresja ciezaru (seria MAX)</div>
       <div class="chart-canvas" id="weight-chart"></div>
+    </div>`;
+
+    html += `<div class="chart-container">
+      <div class="card-title">RIR w czasie</div>
+      <div class="chart-canvas" id="rir-chart"></div>
     </div>`;
 
     html += `<div class="chart-container">
@@ -899,15 +1142,22 @@
     if (currentScreen !== 'charts') return;
 
     if (chartExercise) {
-      const groups = await getSessionSetsGrouped(chartExercise, 20);
-      const data = groups.map(g => {
-        const maxSet = g.find(s => s.type === 'max') || g[g.length - 1];
-        return { weight: maxSet.weight, reps: maxSet.reps };
-      });
+      const history = await analyzeExerciseHistory(chartExercise, 20);
 
-      drawLineChart('weight-chart', data.map((d, i) => ({ x: i, y: d.weight, label: `${d.weight}kg` })), 'kg');
+      // Weight chart
+      const weightData = history.map((h, i) => ({
+        x: i, y: h.maxWeight, label: `${h.maxWeight}kg`
+      }));
+      drawLineChart('weight-chart', weightData, 'kg');
+
+      // RIR chart
+      const rirData = history.filter(h => h.avgRir != null).map((h, i) => ({
+        x: i, y: h.avgRir, label: `RIR ${h.avgRir.toFixed(1)}`
+      }));
+      drawLineChart('rir-chart', rirData, 'RIR', 'var(--cyan)');
     }
 
+    // Volume chart
     const sessions = await getLastSessions(8);
     sessions.reverse();
     const volData = [];
@@ -919,7 +1169,7 @@
     drawBarChart('volume-chart', volData, 'kg');
   }
 
-  function drawLineChart(containerId, data, unit) {
+  function drawLineChart(containerId, data, unit, color) {
     const container = document.getElementById(containerId);
     if (!container || data.length === 0) {
       if (container) container.innerHTML = '<div class="empty-state-text" style="padding:40px 0">Brak danych</div>';
@@ -939,26 +1189,21 @@
     const scaleY = (v) => pad.top + ih - ((v - minY) / (maxY - minY || 1)) * ih;
 
     const points = data.map((d, i) => `${scaleX(i)},${scaleY(d.y)}`).join(' ');
-
-    // Gradient area
     const areaPoints = `${scaleX(0)},${pad.top + ih} ` + points + ` ${scaleX(data.length - 1)},${pad.top + ih}`;
+    const gradId = containerId + '-grad';
 
     let svg = `<svg class="chart-svg" viewBox="0 0 ${w} ${h}">`;
-    svg += `<defs><linearGradient id="areaGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="var(--accent)" stop-opacity="0.3"/><stop offset="100%" stop-color="var(--accent)" stop-opacity="0"/></linearGradient></defs>`;
-    // Grid
+    svg += `<defs><linearGradient id="${gradId}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="${color || 'var(--accent)'}" stop-opacity="0.3"/><stop offset="100%" stop-color="${color || 'var(--accent)'}" stop-opacity="0"/></linearGradient></defs>`;
     for (let i = 0; i <= 4; i++) {
       const y = pad.top + (ih / 4) * i;
       const val = maxY - ((maxY - minY) / 4) * i;
       svg += `<line class="chart-grid" x1="${pad.left}" y1="${y}" x2="${w - pad.right}" y2="${y}"/>`;
-      svg += `<text class="chart-label" x="${pad.left - 5}" y="${y + 4}" text-anchor="end">${Math.round(val)}</text>`;
+      svg += `<text class="chart-label" x="${pad.left - 5}" y="${y + 4}" text-anchor="end">${Math.round(val * 10) / 10}</text>`;
     }
-    // Area
-    svg += `<polygon points="${areaPoints}" fill="url(#areaGrad)"/>`;
-    // Line
-    svg += `<polyline class="chart-line" points="${points}"/>`;
-    // Dots
+    svg += `<polygon points="${areaPoints}" fill="url(#${gradId})"/>`;
+    svg += `<polyline class="chart-line" points="${points}" style="stroke:${color || 'var(--accent)'}"/>`;
     data.forEach((d, i) => {
-      svg += `<circle class="chart-dot" cx="${scaleX(i)}" cy="${scaleY(d.y)}" r="4"/>`;
+      svg += `<circle class="chart-dot" cx="${scaleX(i)}" cy="${scaleY(d.y)}" r="4" style="fill:${color || 'var(--accent)'}"/>`;
     });
     svg += `</svg>`;
     container.innerHTML = svg;
@@ -994,7 +1239,9 @@
     container.innerHTML = svg;
   }
 
-  // ---- DIET ----
+  // ═══════════════════════════════════════════════════════════════
+  // DIET
+  // ═══════════════════════════════════════════════════════════════
   async function renderDiet() {
     const entries = await getTodayDiet();
     const goal = await getDietGoal();
@@ -1070,10 +1317,13 @@
     </div>`;
   }
 
-  // ---- SETTINGS ----
+  // ═══════════════════════════════════════════════════════════════
+  // SETTINGS
+  // ═══════════════════════════════════════════════════════════════
   async function renderSettings() {
     const restTime = await getRestTime();
     const dietGoal = await getDietGoal();
+    const mcInfo = await getMicrocycleInfo();
 
     return `<div class="header"><h1>Ustawienia</h1></div>
       <div class="card">
@@ -1085,6 +1335,14 @@
         <div style="padding:8px 0">
           <button class="btn btn-secondary" data-action="save-rest-time">Zapisz</button>
         </div>
+      </div>
+      <div class="card">
+        <div class="card-title">Mikrocykl</div>
+        <div class="setting-row">
+          <span class="setting-label">${mcInfo.weekLabel}</span>
+          <button class="btn btn-sm btn-secondary" data-action="reset-microcycle">Resetuj cykl</button>
+        </div>
+        <div style="font-size:12px;color:var(--text3);padding:4px 0">3 tygodnie progresji + 1 tydzień deload. Automatyczny cykl.</div>
       </div>
       <div class="card">
         <div class="card-title">Plan treningowy</div>
@@ -1119,7 +1377,9 @@
       </div>`;
   }
 
-  // ---- PLAN EDITOR ----
+  // ═══════════════════════════════════════════════════════════════
+  // PLAN EDITOR
+  // ═══════════════════════════════════════════════════════════════
   async function renderPlanEditor() {
     const plan = await DB.getAll('plan');
     plan.sort((a, b) => a.order - b.order);
@@ -1172,7 +1432,9 @@
     return html;
   }
 
-  // ---- EVENTS ----
+  // ═══════════════════════════════════════════════════════════════
+  // EVENTS
+  // ═══════════════════════════════════════════════════════════════
   function bindEvents() {
     // Nav
     document.querySelectorAll('[data-nav]').forEach(el => {
@@ -1182,13 +1444,41 @@
       });
     });
 
+    // Readiness scale buttons
+    document.querySelectorAll('.readiness-scale .scale-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const field = btn.closest('.readiness-scale').dataset.field;
+        const value = parseInt(btn.dataset.value);
+        if (!preWorkoutData) preWorkoutData = {};
+        preWorkoutData[field] = value;
+        render();
+      });
+    });
+
     // Actions
     document.querySelectorAll('[data-action]').forEach(el => {
       el.addEventListener('click', async (e) => {
         const action = el.dataset.action;
 
         switch (action) {
+          case 'start-readiness':
+            preWorkoutData = { sleep: null, stress: null, soreness: null, notes: '' };
+            currentScreen = 'readiness';
+            render();
+            break;
+
+          case 'back-dashboard':
+            preWorkoutData = null;
+            currentScreen = 'dashboard';
+            render();
+            break;
+
           case 'start-workout':
+            // Grab notes from readiness if present
+            if (currentScreen === 'readiness') {
+              const notesEl = document.getElementById('readiness-notes');
+              if (notesEl && preWorkoutData) preWorkoutData.notes = notesEl.value;
+            }
             await startWorkout();
             break;
 
@@ -1241,12 +1531,14 @@
               if (!updates[setId]) updates[setId] = {};
               if (input.dataset.editField === 'weight') updates[setId].weight = parseFloat(input.value) || 0;
               if (input.dataset.editField === 'reps') updates[setId].reps = parseInt(input.value) || 0;
+              if (input.dataset.editField === 'rir') updates[setId].rir = input.value !== '' ? parseInt(input.value) : null;
             });
             for (const [setId, vals] of Object.entries(updates)) {
               const setData = await DB.get('sessionSets', parseInt(setId));
               if (setData) {
-                setData.weight = vals.weight;
-                setData.reps = vals.reps;
+                if (vals.weight !== undefined) setData.weight = vals.weight;
+                if (vals.reps !== undefined) setData.reps = vals.reps;
+                if (vals.rir !== undefined) setData.rir = vals.rir;
                 await DB.put('sessionSets', setData);
               }
             }
@@ -1295,6 +1587,12 @@
             showToast('Czas przerwy zapisany');
             break;
 
+          case 'reset-microcycle':
+            await DB.put('settings', { key: 'microcycle', value: { week: 1, startDate: today() } });
+            showToast('Cykl zresetowany do tygodnia 1');
+            render();
+            break;
+
           case 'save-diet-goals':
             await DB.put('settings', {
               key: 'dietGoal',
@@ -1316,12 +1614,12 @@
           case 'add-plan-exercise':
             const exSelect = document.getElementById('new-plan-exercise');
             if (!exSelect.value) return;
-            const ex = await DB.get('exercises', parseInt(exSelect.value));
+            const exData = await DB.get('exercises', parseInt(exSelect.value));
             const planAll = await DB.getAll('plan');
             await DB.add('plan', {
-              exerciseId: ex.id,
-              exerciseName: ex.name,
-              muscle: ex.muscle,
+              exerciseId: exData.id,
+              exerciseName: exData.name,
+              muscle: exData.muscle,
               sets: [{ type: 'working', weight: 20, reps: 8 }],
               order: planAll.length
             });
@@ -1411,6 +1709,17 @@
         const val = parseFloat(e.target.value) || 0;
         if (field === 'weight') activeSession.exercises[exI].sets[setI].actualWeight = val;
         if (field === 'reps') activeSession.exercises[exI].sets[setI].actualReps = val;
+      });
+    });
+
+    // RIR select changes during workout
+    document.querySelectorAll('.rir-select').forEach(select => {
+      select.addEventListener('change', (e) => {
+        if (!activeSession) return;
+        const exI = parseInt(e.target.dataset.ex);
+        const setI = parseInt(e.target.dataset.set);
+        if (isNaN(exI) || isNaN(setI)) return;
+        activeSession.exercises[exI].sets[setI].rir = e.target.value !== '' ? parseInt(e.target.value) : null;
       });
     });
 

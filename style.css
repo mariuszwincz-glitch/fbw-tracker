@@ -441,10 +441,10 @@ body::after {
 
 .set-row {
   display: grid;
-  grid-template-columns: 38px 1fr 76px 76px 44px;
+  grid-template-columns: 34px 1fr 66px 56px 48px 38px;
   align-items: center;
-  padding: 10px 12px;
-  gap: 6px;
+  padding: 10px 10px;
+  gap: 4px;
   border-bottom: 1px solid rgba(255,255,255,0.02);
   transition: all 0.3s;
 }
@@ -1223,4 +1223,236 @@ body::after {
   color: var(--text2);
   font-weight: 600;
   font-variant-numeric: tabular-nums;
+}
+
+/* ─── RIR Select ─── */
+.rir-select {
+  width: 100%;
+  background: rgba(255,255,255,0.06);
+  border: 1.5px solid rgba(255,255,255,0.08);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 700;
+  text-align: center;
+  padding: 8px 2px;
+  outline: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+  font-variant-numeric: tabular-nums;
+  transition: all 0.2s;
+}
+.rir-select:focus {
+  border-color: var(--accent);
+  background: rgba(var(--accent-rgb), 0.06);
+}
+.rir-select.done {
+  opacity: 0.5;
+}
+
+/* ─── Set Header Row ─── */
+.set-header-row {
+  display: grid;
+  grid-template-columns: 34px 1fr 66px 56px 48px 38px;
+  padding: 6px 10px;
+  gap: 4px;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text3);
+  font-weight: 700;
+  border-bottom: 1px solid var(--glass-border);
+}
+
+/* ─── Suggestion Bar ─── */
+.suggestion-bar {
+  padding: 8px 14px;
+  font-size: 12px;
+  color: var(--accent2);
+  background: rgba(var(--accent-rgb), 0.06);
+  border-bottom: 1px solid rgba(var(--accent-rgb), 0.1);
+  line-height: 1.4;
+}
+
+/* ─── Rest Time Display ─── */
+.rest-time-display {
+  font-size: 10px;
+  color: var(--text3);
+  padding: 2px 14px 4px 46px;
+}
+
+/* ─── Deload Badge ─── */
+.deload-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+  background: rgba(100, 210, 255, 0.12);
+  color: var(--cyan);
+  border: 1px solid rgba(100, 210, 255, 0.2);
+}
+
+/* ─── Microcycle Badge ─── */
+.microcycle-badge {
+  margin: 0 16px 12px;
+  padding: 12px 16px;
+  border-radius: var(--radius-sm);
+  background: var(--bg2);
+  border: 1px solid var(--glass-border);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text2);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.microcycle-badge.deload {
+  background: rgba(100, 210, 255, 0.06);
+  border-color: rgba(100, 210, 255, 0.15);
+  color: var(--cyan);
+}
+.microcycle-badge span {
+  font-size: 18px;
+}
+
+/* ─── Plan Suggestion ─── */
+.plan-suggest {
+  font-size: 11px;
+  font-weight: 800;
+  padding: 2px 6px;
+  border-radius: 6px;
+}
+.plan-suggest.up {
+  color: var(--green);
+  background: rgba(var(--green-rgb), 0.12);
+}
+.plan-suggest.down {
+  color: var(--red);
+  background: rgba(var(--red-rgb), 0.12);
+}
+
+/* ─── Weekly Volume Row ─── */
+.volume-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+}
+.volume-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 100px;
+}
+.volume-sets {
+  font-size: 11px;
+  color: var(--text3);
+  font-weight: 600;
+}
+.volume-value {
+  font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  min-width: 55px;
+  text-align: right;
+  color: var(--text2);
+}
+
+/* ─── Last Session 4-column ─── */
+.last-session-summary {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+}
+
+/* ─── Readiness Check Screen ─── */
+.readiness-screen {
+  padding: 20px 16px 40px;
+}
+.readiness-header {
+  text-align: center;
+  padding: 20px 0 24px;
+}
+.readiness-header h2 {
+  font-size: 24px;
+  font-weight: 800;
+  letter-spacing: -0.5px;
+  margin-top: 8px;
+}
+.readiness-subtitle {
+  color: var(--text3);
+  font-size: 13px;
+  margin-top: 4px;
+}
+.readiness-card {
+  background: var(--bg2);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin-bottom: 12px;
+}
+.readiness-label {
+  font-size: 14px;
+  font-weight: 700;
+  margin-bottom: 12px;
+}
+.readiness-scale {
+  display: flex;
+  gap: 6px;
+}
+.scale-btn {
+  flex: 1;
+  background: var(--bg3);
+  border: 1.5px solid var(--glass-border);
+  border-radius: 12px;
+  padding: 12px 4px;
+  color: var(--text);
+  font-size: 20px;
+  font-weight: 800;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  transition: all 0.2s var(--transition);
+}
+.scale-btn span {
+  font-size: 9px;
+  color: var(--text3);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.scale-btn:active {
+  transform: scale(0.95);
+}
+.scale-btn.active {
+  background: rgba(var(--accent-rgb), 0.15);
+  border-color: var(--accent);
+  color: var(--accent2);
+  box-shadow: 0 0 16px rgba(var(--accent-rgb), 0.2);
+}
+.scale-btn.active span {
+  color: var(--accent2);
+}
+.readiness-result {
+  background: var(--bg2);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin-bottom: 12px;
+  text-align: center;
+}
+.readiness-score {
+  font-size: 18px;
+  font-weight: 800;
+}
+.readiness-hint {
+  font-size: 12px;
+  color: var(--text3);
+  margin-top: 6px;
 }
