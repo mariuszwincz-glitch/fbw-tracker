@@ -1456,3 +1456,67 @@ body::after {
   color: var(--text3);
   margin-top: 6px;
 }
+
+/* ═══ Suggestion Hero ═══ */
+.suggestion-hero {
+  background: linear-gradient(135deg, rgba(139,92,246,0.18) 0%, rgba(236,72,153,0.12) 100%);
+  border: 1px solid rgba(139,92,246,0.3);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin: 8px 0 12px;
+  text-align: center;
+}
+.suggestion-weight {
+  font-size: 42px;
+  font-weight: 900;
+  letter-spacing: -1px;
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  line-height: 1.1;
+}
+.suggestion-unit {
+  font-size: 22px;
+  font-weight: 700;
+}
+.suggestion-detail {
+  font-size: 13px;
+  color: var(--text2);
+  margin-top: 6px;
+  font-weight: 600;
+}
+.suggestion-reason {
+  font-size: 11px;
+  color: var(--text3);
+  margin-top: 6px;
+  font-style: italic;
+  line-height: 1.4;
+}
+.plan-notes {
+  background: rgba(139,92,246,0.08);
+  border-left: 3px solid var(--accent);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  padding: 8px 12px;
+  margin: 0 0 12px;
+  font-size: 12px;
+  color: var(--text2);
+  line-height: 1.4;
+}
+
+/* ═══ Delete Session Button ═══ */
+.btn-delete-session {
+  background: rgba(239,68,68,0.15);
+  color: #ef4444;
+  border: 1px solid rgba(239,68,68,0.3);
+  border-radius: var(--radius);
+  padding: 12px 24px;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.btn-delete-session:active {
+  background: rgba(239,68,68,0.3);
+  transform: scale(0.97);
+}

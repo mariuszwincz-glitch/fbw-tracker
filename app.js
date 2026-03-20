@@ -167,6 +167,7 @@
   // ════════════════════════════════════════════
   async function render() {
     let html = '';
+    try {
     switch (currentScreen) {
       case 'dashboard': html = await renderDashboard(); break;
       case 'readiness': html = renderReadinessCheck(); break;
@@ -190,6 +191,7 @@
     }
     app.innerHTML = html;
     bindEvents();
+    } catch(e) { console.error('RENDER ERROR:', e); app.innerHTML = '<h1 style="color:red">RENDER ERROR: ' + e.message + '</h1>'; }
   }
 
   // ════════════════════════════════════════════
@@ -352,7 +354,7 @@
     function scaleButtons(key, val) {
       const labels = key === 'sleep' ? ['Fatalny', 'Slaby', 'OK', 'Dobry', 'Swietny'] :
                      key === 'stress' ? ['Max', 'Duzy', 'Sredni', 'Maly', 'Zero'] :
-                     ['Brutal', 'Duzy', 'Sredni', 'Lekki', 'Brak'];
+                     ['Brak', 'Lekka', 'Srednia', 'Duza', 'Brutalna'];
       return [1,2,3,4,5].map(v => `<button class="scale-btn ${val === v ? 'active' : ''}" data-readiness="${key}" data-val="${v}">
         ${v}<span>${labels[v-1]}</span>
       </button>`).join('');
@@ -415,7 +417,8 @@
       const se = sessionExercises[i];
       const exSets = allSessionSets.filter(s => s.exerciseId === se.exerciseId).sort((a, b) => a.setNum - b.setNum);
       const history = await analyzeExerciseHistory(se.exerciseId, 4);
-      const suggestion = suggestWeight(se.exerciseName, se.exerciseType, se.muscle, history, mcInfo.isDeload);
+      const exObj = exMap[se.exerciseId] || { type: se.exerciseType, muscle: se.muscle };
+      const suggestion = suggestWeight(se.exerciseName, se.exerciseType, se.muscle, history, mcInfo.isDeload, exObj);
       const prevSets = await getPrevSessionSets(se.exerciseId);
 
       totalSets += suggestion.sets;
@@ -442,15 +445,28 @@
       const cls = getExerciseClass({ type: ed.exerciseType, muscle: ed.muscle });
       const typeLabel = ed.exerciseType === 'main' ? 'MAIN' : ed.exerciseType === 'secondary' ? 'SEC' : 'ISO';
 
+      // Get plan notes
+      const planItem = (await DB.getAll('plan')).find(p => p.exerciseId === ed.exerciseId);
+      const curExObj = exMap[ed.exerciseId] || {};
+      const planNotes = planItem?.planNotes || curExObj?.notes || '';
+      const targetRir = curExObj?.planRir != null ? curExObj.planRir : 2;
+      const restMin = Math.floor(ed.suggestion.restTime / 60);
+      const restSec = (ed.suggestion.restTime % 60).toString().padStart(2, '0');
+
       html += `<div class="exercise-card">
         <div class="exercise-header">
           <span class="muscle-badge" style="background:${color}">${typeLabel}</span>
           <span class="exercise-name">${ed.exerciseName}</span>
-          <button class="swap-btn" data-swap="${ed.index}">${SWAP_ICON} Zamien</button>
+          <button class="swap-btn" data-swap="${ed.index}">${SWAP_ICON}</button>
         </div>
-        <div class="suggestion-bar">${ed.suggestion.reason} &middot; Przerwa: ${Math.floor(ed.suggestion.restTime/60)}:${(ed.suggestion.restTime%60).toString().padStart(2,'0')}</div>
+        <div class="suggestion-hero">
+          <div class="suggestion-weight">${ed.suggestion.weight}<span class="suggestion-unit">kg</span></div>
+          <div class="suggestion-detail">${ed.suggestion.sets} serii &times; ${ed.suggestion.reps} powt &middot; RIR ${targetRir} &middot; Przerwa ${restMin}:${restSec}</div>
+          <div class="suggestion-reason">${ed.suggestion.reason}</div>
+        </div>
+        ${planNotes ? `<div class="plan-notes">${planNotes}</div>` : ''}
         <div class="set-header-row">
-          <div>SET</div><div>PLAN</div><div>KG</div><div>POWT</div><div>RIR</div><div></div>
+          <div>SET</div><div>SUGESTIA</div><div>KG</div><div>POWT</div><div>RIR</div><div></div>
         </div>`;
 
       const numSets = ed.suggestion.sets;
@@ -513,10 +529,10 @@
       html += `</div>`;
     }
 
-    html += `<div style="padding:16px">
-      <button class="btn btn-primary" data-action="end-workout" style="margin-bottom:10px">&#x1F3C1; Zakoncz trening</button>
+    html += `<div style="padding:16px 16px 40px">
+      <button class="btn btn-primary" data-action="end-workout" style="margin-bottom:20px">&#x1F3C1; Zakoncz trening</button>
     </div>`;
-    html += `<div style="height:120px"></div>`;
+    html += `<div style="height:160px"></div>`;
 
     return html;
   }
@@ -610,6 +626,11 @@
       }
       html += `</div>`;
     }
+
+    // Delete session button
+    html += `<div style="padding:16px 16px 40px;text-align:center">
+      <button class="btn-delete-session" data-action="delete-session" data-session-id="${session.id}">🗑️ Usuń tę sesję</button>
+    </div>`;
 
     return html;
   }
@@ -980,6 +1001,26 @@
           if (confirm('Resetowac mikrocykl?')) {
             await DB.put('settings', { key: 'microcycle', value: { week: 1, startDate: today() } });
             showToast('Mikrocykl zresetowany');
+            render();
+          }
+        }
+
+        else if (action === 'delete-session') {
+          const sessionId = parseInt(el.dataset.sessionId);
+          if (confirm('Na pewno usunąć tę sesję treningową?')) {
+            // Delete session sets
+            const allSets = await DB.getAllByIndex('sessionSets', 'sessionId', sessionId);
+            for (const s of allSets) { await DB.delete('sessionSets', s.id); }
+            // Delete session notes
+            const allNotes = await DB.getAll('notes');
+            for (const n of allNotes) {
+              if (n.sessionId === sessionId) await DB.delete('notes', n.id);
+            }
+            // Delete session itself
+            await DB.delete('sessions', sessionId);
+            showToast('Sesja usunięta');
+            selectedHistorySession = null;
+            currentScreen = 'history';
             render();
           }
         }
