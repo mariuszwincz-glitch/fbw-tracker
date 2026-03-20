@@ -267,14 +267,55 @@ async function seedDatabase() {
     await DB.put('settings', { key: 'dietGoal', value: { kcal: [2400, 2600], protein: [140, 160], fat: [60, 90], carbs: [250, 350] } });
     await DB.put('settings', { key: 'microcycle', value: { week: 1, startDate: new Date().toISOString().slice(0, 10) } });
   } else {
-    // Ensure new exercises exist
+    // AUTO-MIGRATION: update exercises to have workout/type fields
     const existing = await DB.getAll('exercises');
     const existingNames = existing.map(e => e.name);
-    for (const ex of DEFAULT_EXERCISES) {
-      if (!existingNames.includes(ex.name)) {
-        await DB.add('exercises', ex);
+
+    // Update existing exercises with new fields (workout, type, equipment)
+    for (const defEx of DEFAULT_EXERCISES) {
+      const match = existing.find(e => e.name === defEx.name);
+      if (match) {
+        // Upgrade: add missing fields from new schema
+        let changed = false;
+        if (match.workout === undefined && defEx.workout !== null) { match.workout = defEx.workout; changed = true; }
+        if (!match.type && defEx.type) { match.type = defEx.type; changed = true; }
+        if (!match.equipment && defEx.equipment) { match.equipment = defEx.equipment; changed = true; }
+        if (match.order === undefined && defEx.order !== undefined) { match.order = defEx.order; changed = true; }
+        if (changed) await DB.put('exercises', match);
+      } else {
+        await DB.add('exercises', defEx);
       }
     }
+
+    // AUTO-MIGRATION: rebuild plan if it doesn't have A/B workout types
+    const planItems = await DB.getAll('plan');
+    const hasAB = planItems.some(p => p.workout === 'A' || p.workout === 'B');
+    if (!hasAB) {
+      // Clear old plan and rebuild
+      await DB.clear('plan');
+      const allEx = await DB.getAll('exercises');
+      for (const ex of allEx) {
+        if (ex.workout) {
+          const cls = getExerciseClass(ex);
+          const weight = DEFAULT_WEIGHTS[ex.name] || 20;
+          const sets = [];
+          for (let i = 0; i < cls.sets; i++) {
+            sets.push({ type: 'working', weight, reps: cls.repRange[1] });
+          }
+          await DB.add('plan', {
+            exerciseId: ex.id,
+            exerciseName: ex.name,
+            muscle: ex.muscle,
+            workout: ex.workout,
+            exerciseType: ex.type,
+            sets,
+            order: ex.order
+          });
+        }
+      }
+    }
+
+    // Ensure microcycle setting exists
     const mc = await DB.get('settings', 'microcycle');
     if (!mc) {
       await DB.put('settings', { key: 'microcycle', value: { week: 1, startDate: new Date().toISOString().slice(0, 10) } });
