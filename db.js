@@ -159,9 +159,9 @@ const MUSCLE_COLORS = {
 // 'isolation' = izolacje (3 serie, 12-20 powt, RIR 1, przerwa 90s)
 // ═══════════════════════════════════════════════════════════════
 const EXERCISE_CLASS = {
-  main:      { repRange: [6, 8],  sets: 3, weightStep: 2.5, restTime: 150, rirTarget: [2, 2] },
-  secondary: { repRange: [8, 12], sets: 3, weightStep: 2.5, restTime: 120, rirTarget: [1, 2] },
-  isolation: { repRange: [12, 20], sets: 3, weightStep: 1,   restTime: 90,  rirTarget: [0, 1] }
+  main:      { repRange: [6, 8],  sets: 4, weightStep: 2.5, restTime: 150, rirTarget: [2, 2] },
+  secondary: { repRange: [8, 12], sets: 4, weightStep: 2.5, restTime: 120, rirTarget: [1, 2] },
+  isolation: { repRange: [12, 20], sets: 4, weightStep: 1,   restTime: 90,  rirTarget: [0, 1] }
 };
 
 // Nogi: weightStep = 5kg
@@ -205,64 +205,64 @@ const DEFAULT_EXERCISES = [
   // Źródło: raport s.8-9, tabela "Trening 1"
   { name: 'Przysiad ze sztangą',          muscle: 'Nogi',    equipment: 'sztanga', type: 'main',
     workout: 'A', order: 0,
-    planSets: 3, planReps: [6, 8], planRir: 2, planRest: 150,
+    planSets: 4, planReps: [6, 8], planRir: 2, planRest: 150,
     notes: 'High Bar. Pełna głębokość dla stretch-u. Kontrola ekscentryki.' },
 
   { name: 'Wyciskanie sztangi na ławce',  muscle: 'Klatka',  equipment: 'sztanga', type: 'main',
     workout: 'A', order: 1,
-    planSets: 3, planReps: [8, 10], planRir: 2, planRest: 150,
+    planSets: 4, planReps: [8, 10], planRir: 2, planRest: 150,
     notes: 'Kontrolowana ekscentryka (3s). 70-75% 1RM.' },
 
   { name: 'Wiosłowanie hantlą w oparciu', muscle: 'Plecy',   equipment: 'hantle',  type: 'secondary',
     workout: 'A', order: 2,
-    planSets: 3, planReps: [10, 12], planRir: 1, planRest: 120,
+    planSets: 4, planReps: [10, 12], planRir: 1, planRest: 120,
     notes: 'Pełny wyciąg łopatki w dół. Autoregulacja ciężaru.' },
 
   { name: 'Rumuński Martwy Ciąg (RDL)',   muscle: 'Nogi',    equipment: 'sztanga', type: 'secondary',
     workout: 'A', order: 3,
-    planSets: 3, planReps: [10, 12], planRir: 2, planRest: 120,
+    planSets: 4, planReps: [10, 12], planRir: 2, planRest: 120,
     notes: 'Skupienie na biodrach, nie kolanach. 60-70%. Stretch dwugłowych.' },
 
   { name: 'Unoszenie hantli bokiem',       muscle: 'Barki',   equipment: 'hantle',  type: 'isolation',
     workout: 'A', order: 4,
-    planSets: 3, planReps: [15, 20], planRir: 1, planRest: 60,
+    planSets: 4, planReps: [15, 20], planRir: 1, planRest: 60,
     notes: 'Lekki ciężar. Stałe napięcie. Nie zamachy!' },
 
   { name: 'Uginanie ramion z hantlami',   muscle: 'Biceps',  equipment: 'hantle',  type: 'isolation',
     workout: 'A', order: 5,
-    planSets: 2, planReps: [12, 15], planRir: 1, planRest: 60,
+    planSets: 3, planReps: [12, 15], planRir: 1, planRest: 60,
     notes: 'Supinacja. Ostatnia seria: 0 RIR dozwolone.' },
 
   // ═══ TRENING B: Praca w Rozciągnięciu i Pompa (Hypertrophy Focus B) ═══
   // Źródło: raport s.9, tabela "Trening 2"
   { name: 'Martwy Ciąg Klasyczny',        muscle: 'Nogi',    equipment: 'sztanga', type: 'main',
     workout: 'B', order: 0,
-    planSets: 3, planReps: [5, 5], planRir: 3, planRest: 180,
+    planSets: 4, planReps: [5, 5], planRir: 3, planRest: 180,
     notes: 'Budowa globalnej siły. 80-85% 1RM. RIR 3 – nie do upadku!' },
 
   { name: 'Wyciskanie hantli na skosie',  muscle: 'Klatka',  equipment: 'hantle',  type: 'secondary',
     workout: 'B', order: 1,
-    planSets: 3, planReps: [10, 12], planRir: 1, planRest: 120,
+    planSets: 4, planReps: [10, 12], planRir: 1, planRest: 120,
     notes: 'Głęboki zakres – dłonie poniżej linii klatki. Stretch pecs.' },
 
   { name: 'Podciąganie na drążku',         muscle: 'Plecy',   equipment: 'drążek',  type: 'secondary',
     workout: 'B', order: 2,
-    planSets: 3, planReps: [5, 99], planRir: 1, planRest: 150,
+    planSets: 4, planReps: [5, 99], planRir: 1, planRest: 150,
     notes: 'Max powtórzeń. Pełny wyprost w stawie łokciowym.' },
 
   { name: 'Leg Press',                     muscle: 'Nogi',    equipment: 'maszyna', type: 'secondary',
     workout: 'B', order: 3,
-    planSets: 3, planReps: [12, 15], planRir: 1, planRest: 120,
+    planSets: 4, planReps: [12, 15], planRir: 1, planRest: 120,
     notes: 'Stopy nisko – focus na czwórki. Autoregulacja.' },
 
   { name: 'Wyciskanie hantli nad głowę',  muscle: 'Barki',   equipment: 'hantle',  type: 'secondary',
     workout: 'B', order: 4,
-    planSets: 3, planReps: [10, 12], planRir: 2, planRest: 120,
+    planSets: 4, planReps: [10, 12], planRir: 2, planRest: 120,
     notes: 'Stabilizacja tułowia. Autoregulacja ciężaru.' },
 
   { name: 'Dipy (pompki na poręczach)',    muscle: 'Triceps', equipment: 'poręcze', type: 'secondary',
     workout: 'B', order: 5,
-    planSets: 2, planReps: [10, 12], planRir: 1, planRest: 90,
+    planSets: 3, planReps: [10, 12], planRir: 1, planRest: 90,
     notes: 'Praca w dole zakresu. Stretch-mediated hypertrophy.' },
 
   // ═══ ALTERNATYWY DO ZAMIANY (workout: null) ═══
@@ -376,11 +376,32 @@ async function seedDatabase() {
       }
     }
 
-    // AUTO-MIGRATION: rebuild plan if exercises changed (check for new exercise names)
+    // AUTO-MIGRATION: sync exercise params (planSets, planReps, etc.) from defaults
+    const allExForSync = await DB.getAll('exercises');
+    for (const ex of allExForSync) {
+      const def = DEFAULT_EXERCISES.find(d => d.name === ex.name);
+      if (def && (ex.planSets !== def.planSets || ex.planReps?.join() !== def.planReps?.join())) {
+        ex.planSets = def.planSets;
+        ex.planReps = def.planReps;
+        ex.planRir = def.planRir;
+        ex.planRest = def.planRest;
+        ex.notes = def.notes;
+        await DB.put('exercises', ex);
+      }
+    }
+
+    // AUTO-MIGRATION: rebuild plan if exercises changed (check names or planSets)
     const planItems = await DB.getAll('plan');
     const planNames = planItems.map(p => p.exerciseName);
     const expectedNames = DEFAULT_EXERCISES.filter(e => e.workout).map(e => e.name);
-    const needsRebuild = !expectedNames.every(n => planNames.includes(n));
+    let needsRebuild = !expectedNames.every(n => planNames.includes(n));
+    // Also rebuild if planSets changed
+    if (!needsRebuild && planItems.length > 0) {
+      for (const pi of planItems) {
+        const def = DEFAULT_EXERCISES.find(d => d.name === pi.exerciseName);
+        if (def && pi.planSets !== def.planSets) { needsRebuild = true; break; }
+      }
+    }
 
     if (needsRebuild) {
       await DB.clear('plan');
@@ -430,7 +451,7 @@ function getExerciseClass(exercise) {
     const baseStep = isLegs ? 5 : (exercise.type === 'isolation' ? 1 : 2.5);
     return {
       repRange: exercise.planReps || [8, 12],
-      sets: exercise.planSets || 3,
+      sets: exercise.planSets || 4,
       weightStep: baseStep,
       restTime: exercise.planRest || 120,
       rirTarget: exercise.planRir != null ? [exercise.planRir, exercise.planRir] : [1, 2]
