@@ -1,6 +1,7 @@
-// MOSQUITO BOOSTER – IndexedDB wrapper & data + Smart Training Engine
+// MOSQUITO BOOSTER – IndexedDB + Smart Training Engine
+// System: FBW A/B Split, 2x/tydzień, deterministyczna progresja
 const DB_NAME = 'mosquito-booster';
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 
 const DB = {
   _db: null,
@@ -38,7 +39,6 @@ const DB = {
         if (!db.objectStoreNames.contains('settings')) {
           db.createObjectStore('settings', { keyPath: 'key' });
         }
-        // NEW in v3: body stats (sleep, stress, soreness, readiness)
         if (!db.objectStoreNames.contains('bodyStats')) {
           const bs = db.createObjectStore('bodyStats', { keyPath: 'id', autoIncrement: true });
           bs.createIndex('date', 'date', { unique: false });
@@ -144,192 +144,130 @@ const MUSCLE_COLORS = {
   'Nogi': '#22c55e',
   'Triceps': '#a855f7',
   'Biceps': '#f97316',
-  'Kaptury': '#14b8a6'
+  'Posladki': '#ec4899'
 };
 
-// Set types
-const SET_TYPES = {
-  warmup: { label: 'Rozgrzewka', short: 'R', color: '#6b7280' },
-  activation: { label: 'Aktywacja', short: 'A', color: '#f59e0b' },
-  working: { label: 'Robocza', short: 'W', color: '#3b82f6' },
-  max: { label: 'MAX', short: 'M', color: '#ef4444' }
+// ═══════════════════════════════════════════════════════════════
+// EXERCISE CLASSIFICATION
+//
+// 'main'      = główne compound (5-8 powt, 4 serie, przerwa 2-3min)
+// 'secondary' = drugorzędne compound (6-10 powt, 3-4 serie, przerwa 2min)
+// 'isolation' = izolacje (8-15 powt, 3 serie, przerwa 1-2min)
+// ═══════════════════════════════════════════════════════════════
+const EXERCISE_CLASS = {
+  main:      { repRange: [5, 8],  sets: 4, weightStep: 2.5, restTime: 150, rirTarget: [1, 2] },
+  secondary: { repRange: [6, 10], sets: 3, weightStep: 2.5, restTime: 120, rirTarget: [1, 2] },
+  isolation: { repRange: [8, 15], sets: 3, weightStep: 1,   restTime: 90,  rirTarget: [1, 2] }
 };
 
-// RIR scale descriptions
+// Nogi: weightStep = 5kg
+const EXERCISE_CLASS_LEGS = {
+  main:      { ...EXERCISE_CLASS.main, weightStep: 5 },
+  secondary: { ...EXERCISE_CLASS.secondary, weightStep: 2.5 }
+};
+
+// RIR labels
 const RIR_LABELS = {
   0: 'Porażka',
-  1: 'Ostatni powt.',
+  1: 'Ostatni',
   2: 'Jeszcze 2',
   3: 'Jeszcze 3',
-  4: 'Lekko',
-  5: 'Bardzo lekko'
+  4: 'Lekko'
+};
+
+// Set types for display
+const SET_TYPES = {
+  working: { label: 'Robocza', short: 'W', color: '#3b82f6' }
 };
 
 // ═══════════════════════════════════════════════════════════════
-// EXERCISE CLASSIFICATION: COMPOUND vs ISOLATION
-// Compound = wielostawowe (większe skoki ciężaru, niższy zakres powt.)
-// Isolation = jednostawowe (mniejsze skoki, wyższy zakres powt.)
+// TRENING A / B – STAŁA KOLEJNOŚĆ, STAŁE ĆWICZENIA
 // ═══════════════════════════════════════════════════════════════
-const COMPOUND_EXERCISES = [
-  'Bench Press', 'Wyciskanie hantli na ławce', 'Wyciskanie na skosie',
-  'Wiosłowanie', 'Wiosłowanie hantlą', 'Ściąganie drążka', 'Ściąganie wąskim chwytem', 'Podciąganie',
-  'Wyciskanie hantli siedząc', 'Wyciskanie sztangi stojąc', 'Arnoldki',
-  'Leg Press', 'Przysiad ze sztangą', 'Hack Squat', 'Goblet Squat',
-  'Dipy', 'Maszyna na klatkę', 'Maszyna na plecy', 'Maszyna na barki'
-];
 
-function isCompound(exerciseName) {
-  return COMPOUND_EXERCISES.some(c => exerciseName.toLowerCase().includes(c.toLowerCase()));
-}
-
-// ═══════════════════════════════════════════════════════════════
-// DEFAULT EXERCISES
-// ═══════════════════════════════════════════════════════════════
 const DEFAULT_EXERCISES = [
-  // Klatka
-  { name: 'Bench Press', muscle: 'Klatka', equipment: 'sztanga', compound: true },
-  { name: 'Wyciskanie hantli na ławce', muscle: 'Klatka', equipment: 'hantle', compound: true },
-  { name: 'Maszyna na klatkę', muscle: 'Klatka', equipment: 'maszyna', compound: true },
-  { name: 'Rozpiętki wyciąg', muscle: 'Klatka', equipment: 'wyciąg', compound: false },
-  { name: 'Wyciskanie na skosie', muscle: 'Klatka', equipment: 'sztanga/hantle', compound: true },
-  // Plecy
-  { name: 'Wiosłowanie', muscle: 'Plecy', equipment: 'sztanga', compound: true },
-  { name: 'Ściąganie drążka', muscle: 'Plecy', equipment: 'wyciąg', compound: true },
-  { name: 'Wiosłowanie hantlą', muscle: 'Plecy', equipment: 'hantle', compound: true },
-  { name: 'Maszyna na plecy', muscle: 'Plecy', equipment: 'maszyna', compound: true },
-  { name: 'Podciąganie', muscle: 'Plecy', equipment: 'drążek', compound: true },
-  { name: 'Ściąganie wąskim chwytem', muscle: 'Plecy', equipment: 'wyciąg', compound: true },
-  // Barki
-  { name: 'Wyciskanie hantli siedząc', muscle: 'Barki', equipment: 'hantle', compound: true },
-  { name: 'Wznosy boczne', muscle: 'Barki', equipment: 'hantle', compound: false },
-  { name: 'Maszyna na barki', muscle: 'Barki', equipment: 'maszyna', compound: true },
-  { name: 'Wyciskanie sztangi stojąc', muscle: 'Barki', equipment: 'sztanga', compound: true },
-  { name: 'Wznosy boczne wyciąg', muscle: 'Barki', equipment: 'wyciąg', compound: false },
-  { name: 'Arnoldki', muscle: 'Barki', equipment: 'hantle', compound: true },
-  // Nogi
-  { name: 'Leg Press', muscle: 'Nogi', equipment: 'maszyna', compound: true },
-  { name: 'Przysiad ze sztangą', muscle: 'Nogi', equipment: 'sztanga', compound: true },
-  { name: 'Hack Squat', muscle: 'Nogi', equipment: 'maszyna', compound: true },
-  { name: 'Wyprosty nóg', muscle: 'Nogi', equipment: 'maszyna', compound: false },
-  { name: 'Uginanie nóg leżąc', muscle: 'Nogi', equipment: 'maszyna', compound: false },
-  { name: 'Goblet Squat', muscle: 'Nogi', equipment: 'hantle/kettlebell', compound: true },
-  // Triceps
-  { name: 'Rope Pushdown', muscle: 'Triceps', equipment: 'wyciąg', compound: false },
-  { name: 'Francuskie wyciskanie', muscle: 'Triceps', equipment: 'sztanga EZ', compound: false },
-  { name: 'Dipy', muscle: 'Triceps', equipment: 'poręcze', compound: true },
-  { name: 'Maszyna na triceps', muscle: 'Triceps', equipment: 'maszyna', compound: false },
-  { name: 'Pushdown prosty drążek', muscle: 'Triceps', equipment: 'wyciąg', compound: false },
-  // Biceps
-  { name: 'Curl hantlami', muscle: 'Biceps', equipment: 'hantle', compound: false },
-  { name: 'Modlitewnik', muscle: 'Biceps', equipment: 'sztanga EZ', compound: false },
-  { name: 'Curl na wyciągu', muscle: 'Biceps', equipment: 'wyciąg', compound: false },
-  { name: 'Maszyna na biceps', muscle: 'Biceps', equipment: 'maszyna', compound: false },
-  { name: 'Curl młotkowy', muscle: 'Biceps', equipment: 'hantle', compound: false },
-  // Kaptury
-  { name: 'Szrugsy', muscle: 'Kaptury', equipment: 'hantle', compound: false },
-  { name: 'Szrugsy sztangą', muscle: 'Kaptury', equipment: 'sztanga', compound: false },
-  { name: 'Szrugsy na maszynie', muscle: 'Kaptury', equipment: 'maszyna', compound: false }
+  // TRENING A
+  { name: 'Bench Press',           muscle: 'Klatka',  equipment: 'sztanga',  type: 'main',      workout: 'A', order: 0 },
+  { name: 'Incline Dumbbell Press', muscle: 'Klatka',  equipment: 'hantle',   type: 'secondary', workout: 'A', order: 1 },
+  { name: 'Ściąganie drążka',       muscle: 'Plecy',   equipment: 'wyciąg',   type: 'secondary', workout: 'A', order: 2 },
+  { name: 'Wiosłowanie',            muscle: 'Plecy',   equipment: 'sztanga',  type: 'secondary', workout: 'A', order: 3 },
+  { name: 'Wznosy boczne',          muscle: 'Barki',   equipment: 'hantle',   type: 'isolation', workout: 'A', order: 4 },
+  { name: 'Curl hantlami',          muscle: 'Biceps',  equipment: 'hantle',   type: 'isolation', workout: 'A', order: 5 },
+  { name: 'Rope Pushdown',          muscle: 'Triceps', equipment: 'wyciąg',   type: 'isolation', workout: 'A', order: 6 },
+
+  // TRENING B
+  { name: 'Przysiad ze sztangą',    muscle: 'Nogi',     equipment: 'sztanga', type: 'main',      workout: 'B', order: 0 },
+  { name: 'Overhead Press (OHP)',    muscle: 'Barki',    equipment: 'sztanga', type: 'main',      workout: 'B', order: 1 },
+  { name: 'Romanian Deadlift',      muscle: 'Nogi',     equipment: 'sztanga', type: 'secondary', workout: 'B', order: 2 },
+  { name: 'Chest Fly',              muscle: 'Klatka',   equipment: 'maszyna', type: 'isolation', workout: 'B', order: 3 },
+  { name: 'Face Pull',              muscle: 'Plecy',    equipment: 'wyciąg',  type: 'isolation', workout: 'B', order: 4 },
+  { name: 'Modlitewnik',            muscle: 'Biceps',   equipment: 'sztanga', type: 'isolation', workout: 'B', order: 5 },
+  { name: 'French Press',           muscle: 'Triceps',  equipment: 'hantle',  type: 'isolation', workout: 'B', order: 6 },
+
+  // Alternatives for swaps (same muscle group)
+  { name: 'Maszyna na klatkę',     muscle: 'Klatka',  equipment: 'maszyna', type: 'secondary', workout: null, order: 99 },
+  { name: 'Wyciskanie na skosie',  muscle: 'Klatka',  equipment: 'sztanga', type: 'secondary', workout: null, order: 99 },
+  { name: 'Rozpiętki wyciąg',      muscle: 'Klatka',  equipment: 'wyciąg',  type: 'isolation', workout: null, order: 99 },
+  { name: 'Maszyna na plecy',      muscle: 'Plecy',   equipment: 'maszyna', type: 'secondary', workout: null, order: 99 },
+  { name: 'Podciąganie',           muscle: 'Plecy',   equipment: 'drążek',  type: 'secondary', workout: null, order: 99 },
+  { name: 'Ściąganie wąskim',      muscle: 'Plecy',   equipment: 'wyciąg',  type: 'secondary', workout: null, order: 99 },
+  { name: 'Wiosłowanie hantlą',    muscle: 'Plecy',   equipment: 'hantle',  type: 'secondary', workout: null, order: 99 },
+  { name: 'Arnoldki',              muscle: 'Barki',   equipment: 'hantle',  type: 'secondary', workout: null, order: 99 },
+  { name: 'Maszyna na barki',      muscle: 'Barki',   equipment: 'maszyna', type: 'secondary', workout: null, order: 99 },
+  { name: 'Wznosy boczne wyciąg',  muscle: 'Barki',   equipment: 'wyciąg',  type: 'isolation', workout: null, order: 99 },
+  { name: 'Leg Press',             muscle: 'Nogi',    equipment: 'maszyna', type: 'main',      workout: null, order: 99 },
+  { name: 'Hack Squat',            muscle: 'Nogi',    equipment: 'maszyna', type: 'main',      workout: null, order: 99 },
+  { name: 'Wyprosty nóg',          muscle: 'Nogi',    equipment: 'maszyna', type: 'isolation', workout: null, order: 99 },
+  { name: 'Uginanie nóg leżąc',   muscle: 'Nogi',    equipment: 'maszyna', type: 'isolation', workout: null, order: 99 },
+  { name: 'Curl na wyciągu',       muscle: 'Biceps',  equipment: 'wyciąg',  type: 'isolation', workout: null, order: 99 },
+  { name: 'Curl młotkowy',         muscle: 'Biceps',  equipment: 'hantle',  type: 'isolation', workout: null, order: 99 },
+  { name: 'Dipy',                  muscle: 'Triceps', equipment: 'poręcze', type: 'secondary', workout: null, order: 99 },
+  { name: 'Maszyna na triceps',    muscle: 'Triceps', equipment: 'maszyna', type: 'isolation', workout: null, order: 99 },
 ];
 
-// ═══════════════════════════════════════════════════════════════
-// EXPERT FBW PLAN (Full Body Workout, 3x/tydzien)
-// ═══════════════════════════════════════════════════════════════
-const DEFAULT_PLAN = [
-  {
-    exerciseName: 'Leg Press', muscle: 'Nogi',
-    sets: [
-      { type: 'warmup', weight: 60, reps: 12 },
-      { type: 'activation', weight: 90, reps: 6 },
-      { type: 'working', weight: 120, reps: 8 },
-      { type: 'working', weight: 120, reps: 8 },
-      { type: 'max', weight: 120, reps: null }
-    ]
-  },
-  {
-    exerciseName: 'Bench Press', muscle: 'Klatka',
-    sets: [
-      { type: 'warmup', weight: 40, reps: 12 },
-      { type: 'activation', weight: 50, reps: 6 },
-      { type: 'working', weight: 60, reps: 8 },
-      { type: 'working', weight: 60, reps: 8 },
-      { type: 'max', weight: 60, reps: null }
-    ]
-  },
-  {
-    exerciseName: 'Wiosłowanie', muscle: 'Plecy',
-    sets: [
-      { type: 'warmup', weight: 35, reps: 12 },
-      { type: 'working', weight: 50, reps: 8 },
-      { type: 'working', weight: 50, reps: 8 },
-      { type: 'max', weight: 50, reps: null }
-    ]
-  },
-  {
-    exerciseName: 'Wyciskanie hantli siedząc', muscle: 'Barki',
-    sets: [
-      { type: 'warmup', weight: 8, reps: 12 },
-      { type: 'working', weight: 14, reps: 8 },
-      { type: 'working', weight: 14, reps: 8 },
-      { type: 'max', weight: 14, reps: null }
-    ]
-  },
-  {
-    exerciseName: 'Ściąganie drążka', muscle: 'Plecy',
-    sets: [
-      { type: 'working', weight: 50, reps: 10 },
-      { type: 'working', weight: 50, reps: 10 },
-      { type: 'max', weight: 50, reps: null }
-    ]
-  },
-  {
-    exerciseName: 'Wznosy boczne', muscle: 'Barki',
-    sets: [
-      { type: 'working', weight: 8, reps: 15 },
-      { type: 'working', weight: 8, reps: 15 },
-      { type: 'max', weight: 8, reps: null }
-    ]
-  },
-  {
-    exerciseName: 'Rope Pushdown', muscle: 'Triceps',
-    sets: [
-      { type: 'working', weight: 25, reps: 12 },
-      { type: 'working', weight: 25, reps: 12 },
-      { type: 'max', weight: 25, reps: null }
-    ]
-  },
-  {
-    exerciseName: 'Curl hantlami', muscle: 'Biceps',
-    sets: [
-      { type: 'working', weight: 10, reps: 12 },
-      { type: 'working', weight: 10, reps: 12 },
-      { type: 'max', weight: 10, reps: null }
-    ]
-  }
-];
+// Default starting weights (conservative)
+const DEFAULT_WEIGHTS = {
+  'Bench Press': 40, 'Incline Dumbbell Press': 12, 'Ściąganie drążka': 40,
+  'Wiosłowanie': 40, 'Wznosy boczne': 6, 'Curl hantlami': 8, 'Rope Pushdown': 20,
+  'Przysiad ze sztangą': 50, 'Overhead Press (OHP)': 30, 'Romanian Deadlift': 40,
+  'Chest Fly': 15, 'Face Pull': 15, 'Modlitewnik': 15, 'French Press': 8
+};
 
-// Seed database on first launch
+// ═══════════════════════════════════════════════════════════════
+// SEED DATABASE
+// ═══════════════════════════════════════════════════════════════
+
 async function seedDatabase() {
   const exCount = await DB.count('exercises');
   if (exCount === 0) {
     for (const ex of DEFAULT_EXERCISES) {
       await DB.add('exercises', ex);
     }
+    // Build plan from A+B exercises
     const exercises = await DB.getAll('exercises');
-    for (const planItem of DEFAULT_PLAN) {
-      const ex = exercises.find(e => e.name === planItem.exerciseName);
-      await DB.add('plan', {
-        exerciseId: ex.id,
-        exerciseName: ex.name,
-        muscle: planItem.muscle,
-        sets: planItem.sets,
-        order: DEFAULT_PLAN.indexOf(planItem)
-      });
+    for (const ex of exercises) {
+      if (ex.workout) {
+        const cls = getExerciseClass(ex);
+        const weight = DEFAULT_WEIGHTS[ex.name] || 20;
+        const sets = [];
+        for (let i = 0; i < cls.sets; i++) {
+          sets.push({ type: 'working', weight, reps: cls.repRange[1] });
+        }
+        await DB.add('plan', {
+          exerciseId: ex.id,
+          exerciseName: ex.name,
+          muscle: ex.muscle,
+          workout: ex.workout,
+          exerciseType: ex.type,
+          sets,
+          order: ex.order
+        });
+      }
     }
-    await DB.put('settings', { key: 'restTime', value: 180 });
+    await DB.put('settings', { key: 'restTime', value: 120 });
     await DB.put('settings', { key: 'dietGoal', value: { kcal: [2400, 2600], protein: [140, 160], fat: [60, 90], carbs: [250, 350] } });
-    // Initialize microcycle at week 1
     await DB.put('settings', { key: 'microcycle', value: { week: 1, startDate: new Date().toISOString().slice(0, 10) } });
   } else {
+    // Ensure new exercises exist
     const existing = await DB.getAll('exercises');
     const existingNames = existing.map(e => e.name);
     for (const ex of DEFAULT_EXERCISES) {
@@ -337,7 +275,6 @@ async function seedDatabase() {
         await DB.add('exercises', ex);
       }
     }
-    // Ensure microcycle setting exists
     const mc = await DB.get('settings', 'microcycle');
     if (!mc) {
       await DB.put('settings', { key: 'microcycle', value: { week: 1, startDate: new Date().toISOString().slice(0, 10) } });
@@ -346,37 +283,66 @@ async function seedDatabase() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// SMART TRAINING ENGINE
-// Inteligentna progresja z uwzglednieniem RIR, wolumenu, zmeczenia
+// EXERCISE CLASS HELPER
 // ═══════════════════════════════════════════════════════════════
 
-// Analyze exercise history: returns last N sessions' data for an exercise
-// Each entry: { sets: [...], avgRir, maxWeight, maxReps, volume, date }
-async function analyzeExerciseHistory(exerciseId, limit = 5) {
+function getExerciseClass(exercise) {
+  const isLegs = exercise.muscle === 'Nogi';
+  if (isLegs && exercise.type === 'main') return EXERCISE_CLASS_LEGS.main;
+  if (isLegs && exercise.type === 'secondary') return EXERCISE_CLASS_LEGS.secondary;
+  return EXERCISE_CLASS[exercise.type] || EXERCISE_CLASS.isolation;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// NEXT WORKOUT TYPE (A or B)
+// Alternates based on last completed session
+// ═══════════════════════════════════════════════════════════════
+
+async function getNextWorkoutType() {
+  const sessions = await DB.getAll('sessions');
+  const completed = sessions.filter(s => s.completed).sort((a, b) => new Date(b.date) - new Date(a.date));
+  if (completed.length === 0) return 'A';
+  return completed[0].workoutType === 'A' ? 'B' : 'A';
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SMART PROGRESSION ENGINE
+//
+// DETERMINISTIC RULES:
+//
+// ✅ PROGRESJA: ALL serie >= górny zakres → +weightStep
+// ➖ UTRZYMAJ: serie w środku zakresu → ten sam ciężar
+// ⬇️ REGRESJA: większość serii < dolny zakres → -2.5-5%
+// ⚠️ FAILURE: RIR=0 → NIE zwiększaj następnym razem
+//
+// DELOAD (tydzień 4): -20% ciężaru, -30-50% serii
+// ═══════════════════════════════════════════════════════════════
+
+async function analyzeExerciseHistory(exerciseId, limit = 6) {
   const sessions = await DB.getAll('sessions');
   sessions.sort((a, b) => new Date(a.date) - new Date(b.date));
 
   const history = [];
-  for (const s of sessions.slice(-limit * 2)) { // check more sessions to find enough
+  for (const s of sessions.slice(-(limit * 2))) {
     const allSets = await DB.getAllByIndex('sessionSets', 'sessionId', s.id);
     const exSets = allSets.filter(st => st.exerciseId === exerciseId);
     if (exSets.length === 0) continue;
 
-    const workingSets = exSets.filter(st => st.type === 'working' || st.type === 'max');
     const rirs = exSets.filter(st => st.rir != null).map(st => st.rir);
     const avgRir = rirs.length > 0 ? rirs.reduce((a, b) => a + b, 0) / rirs.length : null;
-    const maxSet = exSets.find(st => st.type === 'max') || workingSets[workingSets.length - 1];
     const volume = exSets.reduce((sum, st) => sum + (st.weight || 0) * (st.reps || 0), 0);
+    const avgWeight = exSets.reduce((sum, st) => sum + st.weight, 0) / exSets.length;
+    const avgReps = exSets.reduce((sum, st) => sum + st.reps, 0) / exSets.length;
 
     history.push({
       sessionId: s.id,
       date: s.date,
       sets: exSets,
-      workingSets,
       avgRir,
-      maxWeight: maxSet?.weight || 0,
-      maxReps: maxSet?.reps || 0,
-      volume
+      avgWeight,
+      avgReps,
+      volume,
+      hadFailure: rirs.includes(0)
     });
 
     if (history.length >= limit) break;
@@ -384,260 +350,120 @@ async function analyzeExerciseHistory(exerciseId, limit = 5) {
   return history;
 }
 
-// ═══════════════════════════════════════════════════════════════
-// SMART WEIGHT SUGGESTION
-//
-// Algorytm oparty na zasadach:
-// 1. Analizuje ostatnie 3 treningi danego cwiczenia
-// 2. Bierze pod uwage RIR (closeness to failure)
-// 3. Rozna logika dla compound vs isolation
-//
-// COMPOUND:
-//   zakres robocze: 6-8 powt.
-//   jesli MAX >= 8 + RIR <= 2 przez 2 sesje -> +2.5 kg (2.5-5%)
-//   jesli MAX < 5 lub RIR = 0 przez 3 sesje -> -2.5 kg (deload)
-//   jesli RIR > 2 przy pelnym zakresie -> najpierw zwieksz powt.
-//
-// ISOLATION:
-//   zakres robocze: 10-15 powt.
-//   jesli MAX >= 15 + RIR <= 2 przez 2 sesje -> +1-2 kg
-//   jesli MAX < 8 lub RIR = 0 przez 3 sesje -> -1-2 kg
-//   jesli RIR > 2 -> zwieksz powt. zamiast ciezaru
-//
-// READINESS adjustment:
-//   jesli readiness < 3 (slepy, stress) -> -5% suggested weight
-//   jesli readiness = 5 -> mozliwe +2.5% extra
-// ═══════════════════════════════════════════════════════════════
+function suggestWeight(exerciseName, exerciseType, muscle, history, isDeload = false) {
+  const exInfo = { type: exerciseType, muscle };
+  const cls = getExerciseClass(exInfo);
+  const [repMin, repMax] = cls.repRange;
+  const step = cls.weightStep;
+  const numSets = cls.sets;
 
-function suggestWeight(exerciseName, history, readiness = null) {
-  if (history.length === 0) return null;
-
-  const compound = isCompound(exerciseName);
-  const repTarget = compound ? 8 : 15;
-  const repMin = compound ? 5 : 8;
-  const weightStep = compound ? 2.5 : 2;
-
-  const last = history[history.length - 1];
-  const lastMaxSet = last.sets.find(s => s.type === 'max') || last.workingSets[last.workingSets.length - 1];
-  if (!lastMaxSet) return null;
-
-  const currentWeight = lastMaxSet.weight;
-  const currentReps = lastMaxSet.reps;
-  const lastRir = lastMaxSet.rir != null ? lastMaxSet.rir : (last.avgRir != null ? last.avgRir : 2);
-
-  let suggestedWeight = currentWeight;
-  let suggestedReps = null;
-  let reason = '';
-  let direction = 'maintain';
-
-  // Check last 2 sessions for progression
-  if (history.length >= 2) {
-    const prev = history[history.length - 2];
-    const prevMax = prev.sets.find(s => s.type === 'max') || prev.workingSets[prev.workingSets.length - 1];
-    const prevRir = prevMax?.rir != null ? prevMax.rir : (prev.avgRir != null ? prev.avgRir : 2);
-
-    // PROGRESSION UP: both sessions hit rep target with low RIR
-    if (currentReps >= repTarget && (prevMax?.reps || 0) >= repTarget && lastRir <= 2 && prevRir <= 2) {
-      suggestedWeight = currentWeight + weightStep;
-      suggestedReps = compound ? '6-8' : '10-12';
-      reason = `${currentReps} powt. @ RIR ${lastRir} przez 2 sesje. Czas na +${weightStep}kg!`;
-      direction = 'up';
-    }
-    // HIGH RIR: increase reps first, not weight
-    else if (currentReps >= repTarget && lastRir > 2) {
-      suggestedWeight = currentWeight;
-      suggestedReps = `${repTarget}+`;
-      reason = `RIR ${lastRir} = jeszcze rezerwa. Najpierw wiecej powt. przy ${currentWeight}kg, potem zwieksz ciężar.`;
-      direction = 'reps_first';
-    }
-    // VOLUME DROP: working sets dropped significantly
-    else if (last.workingSets.length > 0 && prev.workingSets.length > 0) {
-      const lastAvg = last.workingSets.reduce((s, x) => s + x.reps, 0) / last.workingSets.length;
-      const prevAvg = prev.workingSets.reduce((s, x) => s + x.reps, 0) / prev.workingSets.length;
-      if (lastAvg < prevAvg - 2 && lastRir <= 1) {
-        suggestedWeight = currentWeight;
-        reason = `Spadek powt. (${lastAvg.toFixed(0)} vs ${prevAvg.toFixed(0)}). Powtorz ciężar, popraw objętość.`;
-        direction = 'fatigue';
-      }
-    }
+  // No history = use default weight
+  if (history.length === 0) {
+    const w = DEFAULT_WEIGHTS[exerciseName] || 20;
+    return {
+      weight: isDeload ? roundToStep(w * 0.8, step) : w,
+      sets: isDeload ? Math.max(2, Math.ceil(numSets * 0.6)) : numSets,
+      reps: `${repMin}-${repMax}`,
+      reason: 'Pierwszy trening. Zacznij od tego ciężaru i skup się na technice.',
+      direction: 'start',
+      restTime: cls.restTime
+    };
   }
 
-  // Check last 3 sessions for deload
+  const last = history[history.length - 1];
+  const lastWeight = last.sets[0]?.weight || DEFAULT_WEIGHTS[exerciseName] || 20;
+  const lastReps = last.sets.map(s => s.reps);
+  const lastAvgReps = lastReps.reduce((a, b) => a + b, 0) / lastReps.length;
+  const hadFailure = last.hadFailure;
+
+  let suggestedWeight = lastWeight;
+  let direction = 'maintain';
+  let reason = '';
+
+  // ✅ PROGRESJA: ALL sets >= upper rep range
+  const allHitMax = lastReps.every(r => r >= repMax);
+  if (allHitMax && !hadFailure) {
+    suggestedWeight = lastWeight + step;
+    direction = 'up';
+    reason = `Wszystkie serie >= ${repMax} powt. Czas na +${step}kg! (${lastWeight} → ${suggestedWeight}kg)`;
+  }
+  // ⚠️ FAILURE CONTROL: RIR=0 → don't increase
+  else if (hadFailure) {
+    suggestedWeight = lastWeight;
+    direction = 'hold_failure';
+    reason = `Ostatnio RIR=0 (porażka). Utrzymaj ${lastWeight}kg i popraw technikę.`;
+  }
+  // ⬇️ REGRESJA: majority < lower rep range
+  else if (lastReps.filter(r => r < repMin).length > lastReps.length / 2) {
+    const reduction = roundToStep(lastWeight * 0.05, step);
+    suggestedWeight = Math.max(step, lastWeight - Math.max(reduction, step));
+    direction = 'down';
+    reason = `Większość serii < ${repMin} powt. Zmniejsz do ${suggestedWeight}kg i odbuduj.`;
+  }
+  // ➖ MAINTAIN: in range
+  else {
+    suggestedWeight = lastWeight;
+    direction = 'maintain';
+    const avgStr = lastAvgReps.toFixed(1);
+    reason = `Śr. ${avgStr} powt. (cel: ${repMax}). Kontynuuj ${lastWeight}kg.`;
+  }
+
+  // Check stagnation (3+ sessions same weight, same reps)
   if (history.length >= 3 && direction === 'maintain') {
-    const last3Max = history.slice(-3).map(h => {
-      const ms = h.sets.find(s => s.type === 'max') || h.workingSets[h.workingSets.length - 1];
-      return ms;
-    }).filter(Boolean);
-
-    // All below min reps = needs deload
-    if (last3Max.every(s => s.reps < repMin)) {
-      suggestedWeight = currentWeight - weightStep;
-      suggestedReps = compound ? '8-10' : '12-15';
-      reason = `Powt. < ${repMin} przez 3 sesje. Deload: -${weightStep}kg i odbuduj formę.`;
-      direction = 'down';
-    }
-
-    // All same = stagnation
-    if (last3Max.length >= 3 && last3Max.every(s => s.weight === last3Max[0].weight && s.reps === last3Max[0].reps)) {
-      suggestedWeight = currentWeight;
-      reason = `${currentWeight}kg x${currentReps} × 3 sesje = stagnacja. Sprobuj wariant lub microload +1.25kg.`;
+    const last3 = history.slice(-3);
+    const allSameWeight = last3.every(h => h.sets[0]?.weight === lastWeight);
+    const allSameReps = last3.every(h => {
+      const avg = h.sets.reduce((a, s) => a + s.reps, 0) / h.sets.length;
+      return Math.abs(avg - lastAvgReps) < 1;
+    });
+    if (allSameWeight && allSameReps) {
+      reason = `Stagnacja (${lastWeight}kg × ~${Math.round(lastAvgReps)} × 3 sesje). Spróbuj microload +${step/2}kg lub zmień wariant.`;
       direction = 'stagnation';
     }
   }
 
-  // RIR = 0 consistently = too heavy
-  if (history.length >= 2) {
-    const recentRirs = history.slice(-2).map(h => {
-      const ms = h.sets.find(s => s.type === 'max') || h.workingSets[h.workingSets.length - 1];
-      return ms?.rir;
-    }).filter(r => r != null);
-    if (recentRirs.length >= 2 && recentRirs.every(r => r === 0)) {
-      suggestedWeight = currentWeight - weightStep;
-      reason = `RIR 0 przez 2 sesje = za ciężko. Zmniejsz o ${weightStep}kg dla bezpiecznej progresji.`;
-      direction = 'down';
-    }
-  }
-
-  // Readiness adjustment
-  if (readiness != null && suggestedWeight > 0) {
-    if (readiness <= 2) {
-      const adj = Math.round(suggestedWeight * 0.05 / weightStep) * weightStep;
-      if (adj > 0) {
-        suggestedWeight -= adj;
-        reason += ` (Zmeczenie: -${adj}kg)`;
-      }
-    } else if (readiness >= 5 && direction === 'up') {
-      // Feeling great = can push a bit more
-      reason += ' (Swietna forma!)';
-    }
-  }
-
-  if (direction === 'maintain' && !reason) {
-    reason = `Kontynuuj ${currentWeight}kg. Cel: ${repTarget} powt. z RIR 1-2.`;
+  // DELOAD: -20% weight, ~60% sets
+  if (isDeload) {
+    suggestedWeight = roundToStep(suggestedWeight * 0.8, step);
+    const deloadSets = Math.max(2, Math.ceil(numSets * 0.6));
+    reason = `DELOAD: ${suggestedWeight}kg × ${deloadSets} serii. Regeneracja.`;
+    return {
+      weight: suggestedWeight,
+      sets: deloadSets,
+      reps: `${repMin}-${repMax}`,
+      reason,
+      direction: 'deload',
+      restTime: cls.restTime
+    };
   }
 
   return {
     weight: Math.max(0, suggestedWeight),
-    reps: suggestedReps,
+    sets: numSets,
+    reps: `${repMin}-${repMax}`,
     reason,
     direction,
-    currentWeight,
-    currentReps
+    restTime: cls.restTime
   };
 }
 
-// Legacy progression check (for dashboard display)
+function roundToStep(value, step) {
+  return Math.round(value / step) * step;
+}
+
+// Legacy compat - checkProgression wrapper
 function checkProgression(exerciseName, sessionSets) {
-  if (sessionSets.length < 2) return null;
-
-  const compound = isCompound(exerciseName);
-  const maxRepTarget = compound ? 8 : 15;
-  const minRepDanger = compound ? 5 : 10;
-  const weightStep = compound ? 2.5 : 2;
-
-  const lastTwo = sessionSets.slice(-2);
-  const maxSets = lastTwo.map(session => {
-    const maxSet = session.find(s => s.type === 'max');
-    return maxSet || null;
-  }).filter(Boolean);
-
-  if (maxSets.length < 2) return null;
-
-  const currentWeight = maxSets[maxSets.length - 1].weight;
-  const currentReps = maxSets[maxSets.length - 1].reps;
-  const lastRir = maxSets[maxSets.length - 1].rir;
-
-  // PROGRESSION UP with RIR awareness
-  if (maxSets.every(s => s.reps >= maxRepTarget)) {
-    // If RIR > 2, suggest more reps first
-    if (lastRir != null && lastRir > 2) {
-      return {
-        suggest: true,
-        direction: 'reps_first',
-        newWeight: currentWeight,
-        message: `${maxRepTarget}+ powt. ale RIR ${lastRir}. Dodaj powtórzenia, potem ciężar.`
-      };
-    }
-    return {
-      suggest: true,
-      direction: 'up',
-      newWeight: currentWeight + weightStep,
-      message: `MAX >= ${maxRepTarget} powt. przez 2 sesje! +${weightStep}kg (${currentWeight} -> ${currentWeight + weightStep}kg)`
-    };
-  }
-
-  // DELOAD DOWN
-  if (sessionSets.length >= 3) {
-    const lastThreeMax = sessionSets.slice(-3).map(session => {
-      const ms = session.find(s => s.type === 'max');
-      return ms || null;
-    }).filter(Boolean);
-
-    if (lastThreeMax.length >= 3 && lastThreeMax.every(s => s.reps < minRepDanger)) {
-      return {
-        suggest: true,
-        direction: 'down',
-        newWeight: currentWeight - weightStep,
-        message: `MAX < ${minRepDanger} powt. przez 3 sesje. -${weightStep}kg i odbuduj (${currentWeight} -> ${currentWeight - weightStep}kg)`
-      };
-    }
-  }
-
-  // STAGNATION
-  if (sessionSets.length >= 4) {
-    const lastFourMax = sessionSets.slice(-4).map(session => {
-      const ms = session.find(s => s.type === 'max');
-      return ms || null;
-    }).filter(Boolean);
-
-    if (lastFourMax.length >= 4) {
-      const allSame = lastFourMax.every(s =>
-        s.weight === lastFourMax[0].weight && s.reps === lastFourMax[0].reps
-      );
-      if (allSame) {
-        return {
-          suggest: true,
-          direction: 'stagnation',
-          newWeight: currentWeight,
-          message: `${currentWeight}kg x${currentReps} × 4 sesje. Sprobuj wariant lub microload +1.25kg`
-        };
-      }
-    }
-  }
-
-  // WORKING SETS FATIGUE
-  if (sessionSets.length >= 2) {
-    const lastSession = sessionSets[sessionSets.length - 1];
-    const prevSession = sessionSets[sessionSets.length - 2];
-    const lastWorking = lastSession.filter(s => s.type === 'working');
-    const prevWorking = prevSession.filter(s => s.type === 'working');
-
-    if (lastWorking.length > 0 && prevWorking.length > 0) {
-      const lastAvgReps = lastWorking.reduce((sum, s) => sum + s.reps, 0) / lastWorking.length;
-      const prevAvgReps = prevWorking.reduce((sum, s) => sum + s.reps, 0) / prevWorking.length;
-
-      if (lastAvgReps < prevAvgReps - 2 && lastAvgReps < (compound ? 6 : 8)) {
-        return {
-          suggest: true,
-          direction: 'fatigue',
-          newWeight: currentWeight,
-          message: `Serie robocze spadly (sr. ${lastAvgReps.toFixed(0)} vs ${prevAvgReps.toFixed(0)} powt.). Rozważ deload lub dłuższe przerwy.`
-        };
-      }
-    }
-  }
-
+  // Not used in new system, kept for backward compat
   return null;
 }
 
 // ═══════════════════════════════════════════════════════════════
-// MICROCYCLE MANAGEMENT
-// 3 tygodnie progresji + 1 tydzień deload = 1 mezocykl
+// MICROCYCLE: 3 tygodnie progresji + 1 tydzień DELOAD
 // ═══════════════════════════════════════════════════════════════
 
 async function getMicrocycleInfo() {
   const mc = await DB.get('settings', 'microcycle');
-  if (!mc) return { week: 1, isDeload: false, sessionsThisWeek: 0 };
+  if (!mc) return { week: 1, isDeload: false, sessionsThisWeek: 0, weekLabel: 'Tydzień 1/4' };
 
   const startDate = new Date(mc.value.startDate);
   const now = new Date();
@@ -646,9 +472,8 @@ async function getMicrocycleInfo() {
   const currentWeek = (weeksSinceStart % 4) + 1;
   const isDeload = currentWeek === 4;
 
-  // Count sessions this week
   const weekStart = new Date(now);
-  weekStart.setDate(weekStart.getDate() - weekStart.getDay() + 1); // Monday
+  weekStart.setDate(weekStart.getDate() - weekStart.getDay() + 1);
   const weekStartStr = weekStart.toISOString().slice(0, 10);
 
   const sessions = await DB.getAll('sessions');
@@ -663,8 +488,7 @@ async function getMicrocycleInfo() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// WEEKLY VOLUME PER MUSCLE GROUP
-// Liczy sumaryczną pracę (kg × powt.) per mięsień z ostatnich 7 dni
+// WEEKLY MUSCLE VOLUME
 // ═══════════════════════════════════════════════════════════════
 
 async function getWeeklyMuscleVolume() {
@@ -691,7 +515,7 @@ async function getWeeklyMuscleVolume() {
       const muscle = ex.muscle;
       if (!muscleVolume[muscle]) { muscleVolume[muscle] = 0; muscleSets[muscle] = 0; }
       muscleVolume[muscle] += (st.weight || 0) * (st.reps || 0);
-      if (st.type === 'working' || st.type === 'max') muscleSets[muscle]++;
+      muscleSets[muscle]++;
     }
   }
 
@@ -700,17 +524,13 @@ async function getWeeklyMuscleVolume() {
 
 // ═══════════════════════════════════════════════════════════════
 // READINESS SCORE
-// Oblicza gotowość do treningu na podstawie snu, stresu, bolesnosci
-// Skala 1-5 (1 = bardzo zle, 5 = super)
 // ═══════════════════════════════════════════════════════════════
 
 function calculateReadiness(bodyStats) {
-  if (!bodyStats) return 3; // default neutral
+  if (!bodyStats) return 3;
   const sleep = bodyStats.sleep || 3;
   const stress = bodyStats.stress || 3;
   const soreness = bodyStats.soreness || 3;
-  // sleep is positive (higher = better), stress and soreness are negative (lower = better)
-  // Normalize: sleep stays, stress/soreness are inverted
   const score = (sleep + (6 - stress) + (6 - soreness)) / 3;
   return Math.round(Math.max(1, Math.min(5, score)));
 }
@@ -723,7 +543,43 @@ function getReadinessLabel(score) {
   return { text: 'Super!', color: '#10b981', emoji: '&#x1F525;' };
 }
 
-// Deload weight modifier
 function getDeloadModifier(isDeload) {
-  return isDeload ? 0.85 : 1.0; // -15% during deload week
+  return isDeload ? 0.8 : 1.0;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// POST-WORKOUT ANALYSIS
+// Generates smart insights after workout
+// ═══════════════════════════════════════════════════════════════
+
+function analyzeWorkoutPerformance(exerciseResults) {
+  let progressed = 0;
+  let maintained = 0;
+  let regressed = 0;
+  const tips = [];
+
+  for (const r of exerciseResults) {
+    if (r.direction === 'up') progressed++;
+    else if (r.direction === 'down' || r.direction === 'hold_failure') regressed++;
+    else maintained++;
+  }
+
+  const total = exerciseResults.length;
+  const pct = Math.round((progressed / total) * 100);
+
+  if (pct >= 70) {
+    tips.push({ icon: '&#x1F525;', text: `Progres w ${progressed}/${total} ćwiczeniach (${pct}%) – <strong>bardzo dobry trening!</strong>` });
+  } else if (pct >= 40) {
+    tips.push({ icon: '&#x1F4AA;', text: `Progres w ${progressed}/${total} ćwiczeniach – <strong>solidny trening.</strong>` });
+  } else if (progressed > 0) {
+    tips.push({ icon: '&#x1F44D;', text: `Progres w ${progressed}/${total} ćwiczeniach. Reszta do poprawy następnym razem.` });
+  } else {
+    tips.push({ icon: '&#x26A0;', text: `Brak progresu. Sprawdź regenerację, sen i dietę.` });
+  }
+
+  if (regressed > 0) {
+    tips.push({ icon: '&#x1F6D1;', text: `${regressed} ćwiczeń z regresem. Czy jesteś wystarczająco zregenerowany?` });
+  }
+
+  return { progressed, maintained, regressed, total, tips };
 }

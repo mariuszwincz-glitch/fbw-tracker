@@ -1,5 +1,5 @@
-// MOSQUITO BOOSTER – Main Application v2.0
-// Smart Training Engine with RIR, Readiness, Microcycles
+// MOSQUITO BOOSTER – AI Coach v3.0
+// FBW A/B Split, Deterministyczna Progresja, Smart Sugestie
 (async function() {
   await DB.open();
   await seedDatabase();
@@ -9,17 +9,15 @@
   let activeSession = null;
   let timerInterval = null;
   let timerSeconds = 0;
-  let timerTotal = 180;
+  let timerTotal = 120;
   let timerRunning = false;
   let selectedHistorySession = null;
   let chartExercise = null;
   let toastTimeout = null;
-  let editingSession = null;
   let swapModalExIdx = null;
   let workoutSummaryData = null;
-  let preWorkoutData = null; // readiness check data
-  let setRestTimes = []; // auto-tracked rest between sets
-  let lastSetTime = null; // timestamp of last completed set
+  let preWorkoutData = null;
+  let lastSetTime = null;
 
   const app = document.getElementById('app');
 
@@ -86,37 +84,20 @@
 
   async function getLastSessions(n = 5) {
     const all = await DB.getAll('sessions');
-    return all.sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, n);
-  }
-
-  async function getSessionSetsGrouped(exerciseId, limit = 5) {
-    const sessions = await DB.getAll('sessions');
-    sessions.sort((a, b) => new Date(a.date) - new Date(b.date));
-    const groups = [];
-    for (const s of sessions.slice(-limit * 2)) {
-      const sets = await DB.getAllByIndex('sessionSets', 'sessionId', s.id);
-      const exSets = sets.filter(st => st.exerciseId === exerciseId);
-      if (exSets.length > 0) groups.push(exSets);
-      if (groups.length >= limit) break;
-    }
-    return groups;
+    return all.filter(s => s.completed).sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, n);
   }
 
   async function getPrevSessionSets(exerciseId) {
     const sessions = await DB.getAll('sessions');
     sessions.sort((a, b) => new Date(b.date) - new Date(a.date));
     for (const s of sessions) {
+      if (!s.completed) continue;
       if (activeSession && s.id === activeSession.id) continue;
       const sets = await DB.getAllByIndex('sessionSets', 'sessionId', s.id);
       const exSets = sets.filter(st => st.exerciseId === exerciseId);
       if (exSets.length > 0) return exSets;
     }
     return [];
-  }
-
-  async function getRestTime() {
-    const s = await DB.get('settings', 'restTime');
-    return s ? s.value : 180;
   }
 
   async function getDietGoal() {
@@ -129,9 +110,10 @@
   }
 
   // ---- TIMER ----
-  function startTimer() {
+  function startTimer(seconds) {
     stopTimer();
     timerRunning = true;
+    timerTotal = seconds || 120;
     timerSeconds = timerTotal;
     timerInterval = setInterval(() => {
       timerSeconds--;
@@ -139,7 +121,7 @@
       if (timerSeconds <= 0) {
         stopTimer();
         playBeep();
-        showToast('Przerwa skonczona!', 'progress');
+        showToast('Przerwa skonczona! Czas na serie!', 'progress');
       }
     }, 1000);
     render();
@@ -180,7 +162,9 @@
     } catch(e) {}
   }
 
-  // ---- RENDER ----
+  // ════════════════════════════════════════════
+  // RENDER ROUTER
+  // ════════════════════════════════════════════
   async function render() {
     let html = '';
     switch (currentScreen) {
@@ -192,838 +176,382 @@
       case 'charts': html = await renderCharts(); break;
       case 'diet': html = await renderDiet(); break;
       case 'settings': html = await renderSettings(); break;
-      case 'plan-editor': html = await renderPlanEditor(); break;
     }
     html += renderNav();
     if (timerRunning && currentScreen === 'workout') {
       const m = Math.floor(timerSeconds / 60);
       const s = timerSeconds % 60;
       html += `<div class="timer-bar">
-        <button class="timer-btn" data-action="timer-skip">Pomin</button>
+        <button class="timer-btn" onclick="document.dispatchEvent(new CustomEvent('stopTimer'))">Stop</button>
         <div class="timer-display">${m}:${s.toString().padStart(2, '0')}</div>
-        <button class="timer-btn" data-action="timer-add30">+30s</button>
-        <div class="timer-progress" style="width: ${((timerTotal - timerSeconds) / timerTotal) * 100}%"></div>
+        <button class="timer-btn" onclick="document.dispatchEvent(new CustomEvent('addTimer', {detail:30}))">+30s</button>
+        <div class="timer-progress" style="width:${((timerTotal - timerSeconds) / timerTotal) * 100}%"></div>
       </div>`;
     }
     app.innerHTML = html;
     bindEvents();
   }
 
-  // ═══════════════════════════════════════════════════════════════
+  // ════════════════════════════════════════════
   // DASHBOARD
-  // ═══════════════════════════════════════════════════════════════
+  // ════════════════════════════════════════════
   async function renderDashboard() {
-    const plan = await DB.getAll('plan');
+    const nextType = await getNextWorkoutType();
+    const mcInfo = await getMicrocycleInfo();
     const sessions = await getLastSessions(1);
     const lastSession = sessions[0];
-    const dietEntries = await getTodayDiet();
-    const dietGoal = await getDietGoal();
-    const mcInfo = await getMicrocycleInfo();
-    const muscleVol = await getWeeklyMuscleVolume();
-
-    const totalProtein = dietEntries.reduce((s, e) => s + (e.protein || 0), 0);
-    const proteinTarget = dietGoal.protein[1];
-    const proteinPct = Math.min(100, Math.round((totalProtein / proteinTarget) * 100));
-
-    // Microcycle badge
-    const mcBadge = mcInfo.isDeload
-      ? `<div class="microcycle-badge deload"><span>&#x1F4A4;</span> TYDZIEŃ DELOAD &middot; -15% ciężaru</div>`
-      : `<div class="microcycle-badge"><span>&#x1F4AA;</span> ${mcInfo.weekLabel} &middot; ${mcInfo.sessionsThisWeek}/3 treningów</div>`;
-
-    let lastSummary = '';
-    if (lastSession) {
-      const sets = await DB.getAllByIndex('sessionSets', 'sessionId', lastSession.id);
-      const totalSets = sets.length;
-      const totalVolume = sets.reduce((s, st) => s + (st.weight || 0) * (st.reps || 0), 0);
-      const avgRir = sets.filter(s => s.rir != null).map(s => s.rir);
-      const rirDisplay = avgRir.length > 0 ? (avgRir.reduce((a, b) => a + b, 0) / avgRir.length).toFixed(1) : '-';
-      lastSummary = `
-        <div class="card">
-          <div class="card-title">Ostatnia sesja</div>
-          <div class="last-session-date">${formatDate(lastSession.date)}</div>
-          <div class="last-session-summary">
-            <div class="stat-item"><div class="stat-value">${totalSets}</div><div class="stat-label">Serii</div></div>
-            <div class="stat-item"><div class="stat-value">${Math.round(totalVolume)}</div><div class="stat-label">Wolumen</div></div>
-            <div class="stat-item"><div class="stat-value">${rirDisplay}</div><div class="stat-label">Śr. RIR</div></div>
-            <div class="stat-item"><div class="stat-value">${lastSession.duration ? Math.round(lastSession.duration / 60) + 'm' : '-'}</div><div class="stat-label">Czas</div></div>
-          </div>
-        </div>`;
-    }
-
-    // Weekly muscle volume
-    let volumeHtml = '';
-    const muscleNames = Object.keys(muscleVol.volume);
-    if (muscleNames.length > 0) {
-      const maxVol = Math.max(...Object.values(muscleVol.volume));
-      volumeHtml = `<div class="card">
-        <div class="card-title">Objętość tygodniowa</div>`;
-      for (const muscle of muscleNames) {
-        const vol = muscleVol.volume[muscle];
-        const sets = muscleVol.sets[muscle] || 0;
-        const pct = maxVol > 0 ? Math.round((vol / maxVol) * 100) : 0;
-        volumeHtml += `<div class="volume-row">
-          <div class="volume-label">
-            <span class="muscle-badge" style="background:${MUSCLE_COLORS[muscle] || '#666'};font-size:9px">${muscle}</span>
-            <span class="volume-sets">${sets} serii</span>
-          </div>
-          <div class="progress-bar" style="flex:1"><div class="progress-fill" style="width:${pct}%;background:${MUSCLE_COLORS[muscle] || '#666'}"></div></div>
-          <span class="volume-value">${Math.round(vol)}kg</span>
-        </div>`;
-      }
-      volumeHtml += `</div>`;
-    }
-
-    // Progressions
-    let progressionHtml = '';
-    const plan2 = await DB.getAll('plan');
-    const planExIds = plan2.map(p => p.exerciseId);
+    const plan = await DB.getAll('plan');
+    const planForNext = plan.filter(p => p.workout === nextType).sort((a, b) => a.order - b.order);
     const exercises = await DB.getAll('exercises');
-    for (const ex of exercises) {
-      if (!planExIds.includes(ex.id)) continue;
-      const history = await analyzeExerciseHistory(ex.id, 5);
-      const suggestion = suggestWeight(ex.name, history);
-      if (suggestion && suggestion.direction !== 'maintain') {
-        const iconMap = { up: '&#x2191;', down: '&#x2193;', stagnation: '&#x26A0;', fatigue: '&#x23F3;', reps_first: '&#x1F4AA;' };
-        const colorMap = { up: 'rgba(34,197,94,0.15)', down: 'rgba(239,68,68,0.15)', stagnation: 'rgba(245,158,11,0.15)', fatigue: 'rgba(100,210,255,0.15)', reps_first: 'rgba(168,85,247,0.15)' };
-        progressionHtml += `
-          <div class="progression-card">
-            <div class="progression-icon" style="background:${colorMap[suggestion.direction] || colorMap.up}">
-              ${iconMap[suggestion.direction] || '&#x2191;'}
-            </div>
-            <div class="progression-info">
-              <div class="progression-name">${ex.name}</div>
-              <div class="progression-msg">${suggestion.reason}</div>
-            </div>
-          </div>`;
-      }
+    const exMap = {};
+    exercises.forEach(e => { exMap[e.id] = e; });
+
+    // Build pre-workout suggestions
+    const suggestions = [];
+    for (const p of planForNext) {
+      const history = await analyzeExerciseHistory(p.exerciseId, 4);
+      const ex = exMap[p.exerciseId];
+      const sug = suggestWeight(p.exerciseName, p.exerciseType, p.muscle, history, mcInfo.isDeload);
+      suggestions.push({ ...sug, name: p.exerciseName, muscle: p.muscle, type: p.exerciseType, exerciseId: p.exerciseId });
     }
 
-    return `
-      <div class="dashboard-hero">
-        <div class="logo-icon" style="color:var(--accent)">${MOSQUITO_SVG}</div>
-        <h2>MOSQUITO BOOSTER</h2>
-        <div class="tagline">${plan.length} cwiczen w planie</div>
-      </div>
-      ${mcBadge}
-      <button class="start-btn" data-action="start-readiness">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-        Rozpocznij trening
-      </button>
-      <div class="card">
-        <div class="card-title">Bialko dzis</div>
-        <div class="protein-bar-wrap">
-          <div class="progress-bar">
-            <div class="progress-fill" style="width: ${proteinPct}%; background: ${proteinPct >= 80 ? 'var(--green)' : 'var(--orange)'}"></div>
-          </div>
-          <div class="protein-value">${totalProtein}g / ${proteinTarget}g</div>
-        </div>
-      </div>
-      ${progressionHtml}
-      ${lastSummary}
-      ${volumeHtml}
-      <div class="card">
-        <div class="card-title">Dzisiejszy plan</div>
-        ${await renderTodayPlan()}
-      </div>`;
-  }
+    // Find focus exercise (the one with 'up' direction)
+    const focusEx = suggestions.find(s => s.direction === 'up');
 
-  async function renderTodayPlan() {
-    const plan = await DB.getAll('plan');
-    plan.sort((a, b) => a.order - b.order);
-    let html = '';
-    for (const p of plan) {
-      const history = await analyzeExerciseHistory(p.exerciseId, 3);
-      const suggestion = suggestWeight(p.exerciseName, history);
-      const prevSets = await getPrevSessionSets(p.exerciseId);
-      const maxSet = prevSets.find(s => s.type === 'max');
-      const workingSet = prevSets.find(s => s.type === 'working');
-      const ref = maxSet || workingSet;
-
-      let suggestHint = '';
-      if (suggestion && suggestion.direction === 'up') {
-        suggestHint = `<span class="plan-suggest up">&#x2191; ${suggestion.weight}kg</span>`;
-      } else if (suggestion && suggestion.direction === 'down') {
-        suggestHint = `<span class="plan-suggest down">&#x2193; ${suggestion.weight}kg</span>`;
-      }
-
-      html += `<div class="plan-item">
-        <span class="muscle-badge" style="background:${MUSCLE_COLORS[p.muscle] || '#666'}">${p.muscle}</span>
-        <span class="plan-item-name">${p.exerciseName}</span>
-        ${suggestHint}
-        <span class="plan-item-weight">${ref ? ref.weight + 'kg' : p.sets[p.sets.length-1].weight + 'kg'}</span>
-      </div>`;
-    }
-    return html;
-  }
-
-  // ═══════════════════════════════════════════════════════════════
-  // PRE-WORKOUT READINESS CHECK
-  // Pytamy: sen, stres, bolesnosc miesni -> readiness score
-  // ═══════════════════════════════════════════════════════════════
-  function renderReadinessCheck() {
-    return `
-      <div class="readiness-screen">
-        <div class="readiness-header">
-          <button class="back-btn" data-action="back-dashboard">&#x2190;</button>
-          <h2>Jak się dziś czujesz?</h2>
-          <p class="readiness-subtitle">Dostosujemy trening do Twojej formy</p>
-        </div>
-
-        <div class="readiness-card">
-          <div class="readiness-label">&#x1F634; Sen (ostatnia noc)</div>
-          <div class="readiness-scale" data-field="sleep">
-            <button class="scale-btn ${preWorkoutData?.sleep === 1 ? 'active' : ''}" data-value="1">1<span>Fatalny</span></button>
-            <button class="scale-btn ${preWorkoutData?.sleep === 2 ? 'active' : ''}" data-value="2">2<span>Slaby</span></button>
-            <button class="scale-btn ${preWorkoutData?.sleep === 3 ? 'active' : ''}" data-value="3">3<span>OK</span></button>
-            <button class="scale-btn ${preWorkoutData?.sleep === 4 ? 'active' : ''}" data-value="4">4<span>Dobry</span></button>
-            <button class="scale-btn ${preWorkoutData?.sleep === 5 ? 'active' : ''}" data-value="5">5<span>Super</span></button>
-          </div>
-        </div>
-
-        <div class="readiness-card">
-          <div class="readiness-label">&#x1F4A5; Stres</div>
-          <div class="readiness-scale" data-field="stress">
-            <button class="scale-btn ${preWorkoutData?.stress === 1 ? 'active' : ''}" data-value="1">1<span>Zero</span></button>
-            <button class="scale-btn ${preWorkoutData?.stress === 2 ? 'active' : ''}" data-value="2">2<span>Lekki</span></button>
-            <button class="scale-btn ${preWorkoutData?.stress === 3 ? 'active' : ''}" data-value="3">3<span>Sredni</span></button>
-            <button class="scale-btn ${preWorkoutData?.stress === 4 ? 'active' : ''}" data-value="4">4<span>Duzy</span></button>
-            <button class="scale-btn ${preWorkoutData?.stress === 5 ? 'active' : ''}" data-value="5">5<span>Max</span></button>
-          </div>
-        </div>
-
-        <div class="readiness-card">
-          <div class="readiness-label">&#x1F525; Bolesnosc miesni (DOMS)</div>
-          <div class="readiness-scale" data-field="soreness">
-            <button class="scale-btn ${preWorkoutData?.soreness === 1 ? 'active' : ''}" data-value="1">1<span>Brak</span></button>
-            <button class="scale-btn ${preWorkoutData?.soreness === 2 ? 'active' : ''}" data-value="2">2<span>Lekka</span></button>
-            <button class="scale-btn ${preWorkoutData?.soreness === 3 ? 'active' : ''}" data-value="3">3<span>Srednia</span></button>
-            <button class="scale-btn ${preWorkoutData?.soreness === 4 ? 'active' : ''}" data-value="4">4<span>Duza</span></button>
-            <button class="scale-btn ${preWorkoutData?.soreness === 5 ? 'active' : ''}" data-value="5">5<span>Ciężka</span></button>
-          </div>
-        </div>
-
-        <div class="readiness-card">
-          <div class="readiness-label">&#x1F4DD; Notatki (opcjonalnie)</div>
-          <textarea class="note-input" rows="2" placeholder="Np. mało jadłem, jestem po chorobie..." id="readiness-notes">${preWorkoutData?.notes || ''}</textarea>
-        </div>
-
-        ${preWorkoutData?.sleep ? (() => {
-          const score = calculateReadiness(preWorkoutData);
-          const info = getReadinessLabel(score);
-          return `<div class="readiness-result" style="border-color: ${info.color}40">
-            <div class="readiness-score" style="color: ${info.color}">${info.emoji} Gotowość: ${score}/5 – ${info.text}</div>
-            ${score <= 2 ? '<div class="readiness-hint">Zmniejszymy ciężary o ~5% na dziś</div>' : ''}
-            ${score >= 5 ? '<div class="readiness-hint" style="color:var(--green)">Daj z siebie wszystko!</div>' : ''}
-          </div>`;
-        })() : ''}
-
-        <button class="start-btn" data-action="start-workout" style="margin-top:8px">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-          ${preWorkoutData?.sleep ? 'Zaczynamy!' : 'Pomiń i zacznij'}
-        </button>
-      </div>`;
-  }
-
-  // ═══════════════════════════════════════════════════════════════
-  // ACTIVE WORKOUT
-  // ═══════════════════════════════════════════════════════════════
-  async function startWorkout() {
-    const plan = await DB.getAll('plan');
-    plan.sort((a, b) => a.order - b.order);
-    timerTotal = await getRestTime();
-    const mcInfo = await getMicrocycleInfo();
-    const deloadMod = getDeloadModifier(mcInfo.isDeload);
-    const readiness = preWorkoutData ? calculateReadiness(preWorkoutData) : 3;
-
-    // Save body stats
-    if (preWorkoutData && preWorkoutData.sleep) {
-      await DB.add('bodyStats', {
-        date: today(),
-        sleep: preWorkoutData.sleep,
-        stress: preWorkoutData.stress,
-        soreness: preWorkoutData.soreness,
-        notes: preWorkoutData.notes || '',
-        readiness
-      });
-    }
-
-    const sessionId = await DB.add('sessions', {
-      date: today(),
-      startTime: Date.now(),
-      duration: null,
-      completed: false,
-      readiness,
-      isDeload: mcInfo.isDeload
-    });
-
-    const exerciseData = [];
-    for (const p of plan) {
-      const prevSets = await getPrevSessionSets(p.exerciseId);
-      const history = await analyzeExerciseHistory(p.exerciseId, 3);
-      const suggestion = suggestWeight(p.exerciseName, history, readiness);
-
-      const sets = p.sets.map((s, i) => {
-        const prev = prevSets[i];
-        let weight = prev ? prev.weight : s.weight;
-        let reps = prev ? prev.reps : s.reps;
-
-        // Apply suggestion to working/max sets
-        if (suggestion && (s.type === 'working' || s.type === 'max')) {
-          if (suggestion.direction === 'up') {
-            weight = suggestion.weight;
-          } else if (suggestion.direction === 'down') {
-            weight = suggestion.weight;
-          }
-        }
-
-        // Apply deload modifier
-        if (mcInfo.isDeload && (s.type === 'working' || s.type === 'max')) {
-          weight = Math.round(weight * deloadMod / 2.5) * 2.5;
-        }
-
-        return {
-          ...s,
-          index: i,
-          actualWeight: weight,
-          actualReps: reps,
-          rir: null,
-          completed: false,
-          restTime: null
-        };
-      });
-
-      exerciseData.push({
-        exerciseId: p.exerciseId,
-        exerciseName: p.exerciseName,
-        muscle: p.muscle,
-        sets,
-        suggestion: suggestion ? suggestion.reason : null,
-        note: ''
-      });
-    }
-
-    activeSession = {
-      id: sessionId,
-      exercises: exerciseData,
-      currentExercise: 0,
-      startTime: Date.now(),
-      readiness,
-      isDeload: mcInfo.isDeload
-    };
-
-    lastSetTime = null;
-    setRestTimes = [];
-    currentScreen = 'workout';
-    render();
-  }
-
-  async function renderWorkout() {
-    if (!activeSession) return '<div class="empty-state">Brak aktywnej sesji</div>';
-
-    const ex = activeSession.exercises;
-    const completedSets = ex.reduce((a, e) => a + e.sets.filter(s => s.completed).length, 0);
-    const totalSets = ex.reduce((a, e) => a + e.sets.length, 0);
-
-    let html = `<div class="workout-header">
-      <button class="back-btn" data-action="end-workout">&#x2715; Zakoncz</button>
-      <div class="workout-progress">${completedSets}/${totalSets} serii</div>
-      ${activeSession.isDeload ? '<span class="deload-badge">DELOAD</span>' : ''}
+    let html = `<div class="dashboard-hero">
+      <div class="logo-icon">${MOSQUITO_SVG}</div>
+      <h2>MOSQUITO BOOSTER</h2>
+      <div class="tagline">AI Coach &middot; FBW A/B Split</div>
     </div>`;
 
-    for (let ei = 0; ei < ex.length; ei++) {
-      const e = ex[ei];
-      const allDone = e.sets.every(s => s.completed);
-      const prevSets = await getPrevSessionSets(e.exerciseId);
-
-      html += `<div class="exercise-card" id="ex-${ei}">
-        <div class="exercise-header">
-          <span class="muscle-badge" style="background:${MUSCLE_COLORS[e.muscle] || '#666'}">${e.muscle}</span>
-          <span class="exercise-name">${e.exerciseName}</span>
-          ${allDone ? '<span style="color:var(--green);font-weight:700">&#x2713;</span>' : ''}
-          <button class="swap-btn" data-action="open-swap" data-ex="${ei}">${SWAP_ICON} Zamien</button>
-        </div>`;
-
-      // Smart suggestion tooltip
-      if (e.suggestion && !allDone) {
-        html += `<div class="suggestion-bar">${e.suggestion}</div>`;
-      }
-
-      // Set header row
-      html += `<div class="set-header-row">
-        <div>Seria</div><div>Plan</div><div>Ciężar</div><div>Powt.</div><div>RIR</div><div></div>
-      </div>`;
-
-      for (let si = 0; si < e.sets.length; si++) {
-        const s = e.sets[si];
-        const st = SET_TYPES[s.type];
-        const prev = prevSets[si];
-        const isActive = !s.completed && (si === 0 || e.sets[si - 1].completed);
-
-        let comparison = '';
-        if (prev && s.completed && s.actualReps !== null && prev.reps !== null) {
-          if (s.actualWeight > prev.weight || (s.actualWeight === prev.weight && s.actualReps > prev.reps)) {
-            comparison = '<span class="comparison better">&#x25B2;</span>';
-          } else if (s.actualWeight < prev.weight || (s.actualWeight === prev.weight && s.actualReps < prev.reps)) {
-            comparison = '<span class="comparison worse">&#x25BC;</span>';
-          } else {
-            comparison = '<span class="comparison same">=</span>';
-          }
-        }
-
-        html += `<div class="set-row ${isActive ? 'active-set' : ''} ${s.completed ? 'completed' : ''}">
-          <div class="set-type" style="color:${st.color}">${st.short}${si + 1}</div>
-          <div class="set-planned">${s.weight}kg x ${s.reps || 'MAX'}</div>
-          <input class="set-input" type="number" inputmode="decimal" step="0.5" placeholder="${s.weight}"
-            value="${s.actualWeight || ''}" data-ex="${ei}" data-set="${si}" data-field="weight"
-            ${s.completed ? 'disabled' : ''}>
-          <input class="set-input" type="number" inputmode="numeric" placeholder="${s.reps || '?'}"
-            value="${s.actualReps || ''}" data-ex="${ei}" data-set="${si}" data-field="reps"
-            ${s.completed ? 'disabled' : ''}>
-          <select class="rir-select ${s.completed ? 'done' : ''}" data-ex="${ei}" data-set="${si}" data-field="rir" ${s.completed ? 'disabled' : ''}>
-            <option value="" ${s.rir == null ? 'selected' : ''}>-</option>
-            <option value="0" ${s.rir === 0 ? 'selected' : ''}>0</option>
-            <option value="1" ${s.rir === 1 ? 'selected' : ''}>1</option>
-            <option value="2" ${s.rir === 2 ? 'selected' : ''}>2</option>
-            <option value="3" ${s.rir === 3 ? 'selected' : ''}>3</option>
-            <option value="4" ${s.rir === 4 ? 'selected' : ''}>4+</option>
-          </select>
-          <button class="set-check ${s.completed ? 'done' : ''}" data-action="complete-set" data-ex="${ei}" data-set="${si}">
-            ${s.completed ? '&#x2713;' : '&#x25CB;'}
-          </button>
-        </div>`;
-
-        if (prev && !s.completed) {
-          html += `<div class="prev-result">Poprzednio: ${prev.weight}kg x ${prev.reps || '-'} ${prev.rir != null ? '(RIR ' + prev.rir + ')' : ''} ${comparison}</div>`;
-        }
-
-        // Show rest time if tracked
-        if (s.completed && s.restTime) {
-          html += `<div class="rest-time-display">&#x23F1; Przerwa: ${Math.round(s.restTime)}s</div>`;
-        }
-      }
-
-      html += `<div class="note-area">
-        <textarea class="note-input" rows="1" placeholder="Notatka (forma, technika, kontuzja...)" data-ex="${ei}" data-note="true">${e.note || ''}</textarea>
-      </div>`;
-
-      html += `</div>`;
-    }
-
-    html += `<div style="height: 100px;"></div>`;
-    return html;
-  }
-
-  async function completeSet(exIdx, setIdx) {
-    const s = activeSession.exercises[exIdx].sets[setIdx];
-    if (s.completed) return;
-
-    const weightInput = document.querySelector(`input[data-ex="${exIdx}"][data-set="${setIdx}"][data-field="weight"]`);
-    const repsInput = document.querySelector(`input[data-ex="${exIdx}"][data-set="${setIdx}"][data-field="reps"]`);
-    const rirSelect = document.querySelector(`select[data-ex="${exIdx}"][data-set="${setIdx}"][data-field="rir"]`);
-
-    s.actualWeight = parseFloat(weightInput?.value) || s.weight;
-    s.actualReps = parseInt(repsInput?.value) || s.reps || 0;
-    s.rir = rirSelect?.value !== '' ? parseInt(rirSelect.value) : null;
-    s.completed = true;
-
-    // Track rest time (time since last completed set)
-    const now = Date.now();
-    if (lastSetTime) {
-      s.restTime = Math.round((now - lastSetTime) / 1000);
-      setRestTimes.push(s.restTime);
-    }
-    lastSetTime = now;
-
-    await DB.add('sessionSets', {
-      sessionId: activeSession.id,
-      exerciseId: activeSession.exercises[exIdx].exerciseId,
-      exerciseName: activeSession.exercises[exIdx].exerciseName,
-      type: s.type,
-      setIndex: setIdx,
-      weight: s.actualWeight,
-      reps: s.actualReps,
-      rir: s.rir,
-      restTime: s.restTime || null,
-      plannedWeight: s.weight,
-      plannedReps: s.reps
-    });
-
-    startTimer();
-    render();
-  }
-
-  // ---- SWAP EXERCISE ----
-  async function openSwapModal(exIdx) {
-    swapModalExIdx = exIdx;
-    const ex = activeSession.exercises[exIdx];
-    const allExercises = await DB.getAll('exercises');
-    const alternatives = allExercises.filter(e => e.muscle === ex.muscle);
-
-    let modalHtml = `<div class="swap-modal-overlay" data-action="close-swap">
-      <div class="swap-modal" onclick="event.stopPropagation()">
-        <div class="swap-modal-title">Zamien cwiczenie</div>
-        <div class="swap-modal-subtitle">${ex.muscle} &middot; Wybierz alternatywe</div>`;
-
-    for (const alt of alternatives) {
-      const isCurrent = alt.name === ex.exerciseName;
-      modalHtml += `<div class="swap-option ${isCurrent ? 'current' : ''}" data-action="swap-to" data-ex-id="${alt.id}" data-ex-name="${alt.name}">
-        <div class="swap-option-name">${alt.name}</div>
-        <div class="swap-option-equip">${alt.equipment}</div>
-        ${isCurrent ? '<span style="color:var(--accent);font-size:12px;font-weight:700">AKTUALNY</span>' : ''}
-      </div>`;
-    }
-
-    modalHtml += `<div class="swap-custom">
-        <div class="swap-custom-label">Albo wpisz wlasna nazwe:</div>
-        <div class="swap-custom-row">
-          <input class="swap-custom-input" type="text" placeholder="Np. maszyna przy oknie..." id="custom-exercise-name">
-          <button class="btn btn-primary btn-sm" data-action="swap-custom">OK</button>
-        </div>
+    // Microcycle badge
+    html += `<div class="microcycle-badge ${mcInfo.isDeload ? 'deload' : ''}">
+      <span>${mcInfo.isDeload ? '&#x1F9CA;' : '&#x1F4C5;'}</span>
+      <div>
+        <div style="font-weight:800;color:var(--text)">${mcInfo.weekLabel}</div>
+        <div style="font-size:11px;margin-top:2px">${mcInfo.sessionsThisWeek}/2 treningow w tym tygodniu</div>
       </div>
-      <button class="swap-cancel" data-action="close-swap">Anuluj</button>
-    </div></div>`;
+    </div>`;
 
-    const el = document.createElement('div');
-    el.innerHTML = modalHtml;
-    document.body.appendChild(el.firstChild);
-
-    document.querySelectorAll('[data-action="swap-to"]').forEach(btn => {
-      btn.addEventListener('click', async () => {
-        await doSwap(parseInt(btn.dataset.exId), btn.dataset.exName);
-      });
-    });
-
-    document.querySelectorAll('[data-action="swap-custom"]').forEach(btn => {
-      btn.addEventListener('click', async () => {
-        const customName = document.getElementById('custom-exercise-name')?.value?.trim();
-        if (!customName) return;
-        const allEx = await DB.getAll('exercises');
-        let existing = allEx.find(e => e.name === customName);
-        if (!existing) {
-          const muscle = activeSession.exercises[swapModalExIdx].muscle;
-          const newId = await DB.add('exercises', { name: customName, muscle, equipment: 'inne' });
-          await doSwap(newId, customName);
-        } else {
-          await doSwap(existing.id, existing.name);
-        }
-      });
-    });
-
-    document.querySelectorAll('[data-action="close-swap"]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const overlay = document.querySelector('.swap-modal-overlay');
-        if (overlay) overlay.remove();
-        swapModalExIdx = null;
-      });
-    });
-  }
-
-  async function doSwap(newExId, newExName) {
-    const exIdx = swapModalExIdx;
-    const oldEx = activeSession.exercises[exIdx];
-
-    const prevSets = await getPrevSessionSets(newExId);
-    oldEx.exerciseId = newExId;
-    oldEx.exerciseName = newExName;
-
-    // Recalculate suggestion for new exercise
-    const history = await analyzeExerciseHistory(newExId, 3);
-    const suggestion = suggestWeight(newExName, history, activeSession.readiness);
-    oldEx.suggestion = suggestion ? suggestion.reason : null;
-
-    for (let i = 0; i < oldEx.sets.length; i++) {
-      if (!oldEx.sets[i].completed) {
-        const prev = prevSets[i];
-        if (prev) {
-          oldEx.sets[i].actualWeight = prev.weight;
-          oldEx.sets[i].actualReps = prev.reps;
-        }
-      }
+    // Pre-workout focus tip
+    if (focusEx) {
+      html += `<div class="card" style="border-color:rgba(var(--green-rgb),0.15);background:rgba(var(--green-rgb),0.04)">
+        <div style="font-size:12px;color:var(--green);font-weight:800;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">&#x1F3AF; Cel dzisiejszego treningu</div>
+        <div style="font-size:15px;font-weight:700">Skup sie na progresji w <strong>${focusEx.name}</strong></div>
+        <div style="font-size:12px;color:var(--text2);margin-top:4px">${focusEx.reason}</div>
+      </div>`;
+    } else if (mcInfo.isDeload) {
+      html += `<div class="card" style="border-color:rgba(100,210,255,0.15);background:rgba(100,210,255,0.04)">
+        <div style="font-size:12px;color:var(--cyan);font-weight:800;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">&#x1F9CA; DELOAD</div>
+        <div style="font-size:15px;font-weight:700">Tydzien regeneracji</div>
+        <div style="font-size:12px;color:var(--text2);margin-top:4px">Zmniejszone ciezary i objetosc. Twoje cialo potrzebuje odpoczynku.</div>
+      </div>`;
     }
 
-    const overlay = document.querySelector('.swap-modal-overlay');
-    if (overlay) overlay.remove();
-    swapModalExIdx = null;
-    showToast(`Zamieniono na: ${newExName}`);
-    render();
-  }
+    // Start button
+    const typeColor = nextType === 'A' ? 'var(--accent)' : 'var(--green)';
+    html += `<button class="start-btn" data-action="start-workout">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polygon points="5 3 19 12 5 21 5 3" fill="currentColor"/></svg>
+      TRENING ${nextType}
+    </button>`;
 
-  // ═══════════════════════════════════════════════════════════════
-  // END WORKOUT & SUMMARY
-  // ═══════════════════════════════════════════════════════════════
-  async function endWorkout() {
-    stopTimer();
-    const duration = Math.round((Date.now() - activeSession.startTime) / 1000);
-
-    for (let i = 0; i < activeSession.exercises.length; i++) {
-      const noteEl = document.querySelector(`textarea[data-ex="${i}"]`);
-      if (noteEl && noteEl.value.trim()) {
-        await DB.add('notes', {
-          sessionId: activeSession.id,
-          exerciseId: activeSession.exercises[i].exerciseId,
-          text: noteEl.value.trim()
-        });
-      }
-    }
-
-    const session = await DB.get('sessions', activeSession.id);
-    session.duration = duration;
-    session.completed = true;
-    await DB.put('sessions', session);
-
-    await buildWorkoutSummary(session);
-
-    activeSession = null;
-    preWorkoutData = null;
-    currentScreen = 'dashboard';
-    render();
-    showSummaryOverlay();
-  }
-
-  async function buildWorkoutSummary(session) {
-    const sets = await DB.getAllByIndex('sessionSets', 'sessionId', session.id);
-    const exercises = await DB.getAll('exercises');
-
-    const grouped = {};
-    sets.forEach(s => {
-      if (!grouped[s.exerciseName]) grouped[s.exerciseName] = { sets: [], exerciseId: s.exerciseId };
-      grouped[s.exerciseName].sets.push(s);
-    });
-
-    const totalVolume = sets.reduce((sum, s) => sum + s.weight * s.reps, 0);
-    const totalSets = sets.length;
-    const totalReps = sets.reduce((sum, s) => sum + s.reps, 0);
-    const rirs = sets.filter(s => s.rir != null).map(s => s.rir);
-    const avgRir = rirs.length > 0 ? (rirs.reduce((a, b) => a + b, 0) / rirs.length).toFixed(1) : null;
-    const avgRestTime = setRestTimes.length > 0 ? Math.round(setRestTimes.reduce((a, b) => a + b, 0) / setRestTimes.length) : null;
-    const musclesWorked = [...new Set(sets.map(s => {
-      const ex = exercises.find(e => e.id === s.exerciseId);
-      return ex ? ex.muscle : '?';
-    }))];
-
-    const prs = [];
-    const insights = [];
-
-    for (const [name, data] of Object.entries(grouped)) {
-      const maxSet = data.sets.find(s => s.type === 'max');
-
-      const sessions = await DB.getAll('sessions');
-      sessions.sort((a, b) => new Date(b.date) - new Date(a.date));
-      let prevSessionSets = [];
-      for (const s of sessions) {
-        if (s.id === session.id) continue;
-        const sSets = await DB.getAllByIndex('sessionSets', 'sessionId', s.id);
-        const exSets = sSets.filter(st => st.exerciseId === data.exerciseId);
-        if (exSets.length > 0) { prevSessionSets = exSets; break; }
-      }
-
-      if (maxSet && prevSessionSets.length > 0) {
-        const prevMax = prevSessionSets.find(s => s.type === 'max');
-        if (prevMax) {
-          if (maxSet.weight > prevMax.weight) {
-            prs.push({ name, type: 'weight', value: `${maxSet.weight}kg (bylo ${prevMax.weight}kg)` });
-          } else if (maxSet.weight === prevMax.weight && maxSet.reps > prevMax.reps) {
-            prs.push({ name, type: 'reps', value: `${maxSet.reps} powt. (bylo ${prevMax.reps})` });
-          }
-        }
-      }
-
-      const exVol = data.sets.reduce((sum, s) => sum + s.weight * s.reps, 0);
-      if (prevSessionSets.length > 0) {
-        const prevVol = prevSessionSets.reduce((sum, s) => sum + s.weight * s.reps, 0);
-        const diff = Math.round(((exVol - prevVol) / prevVol) * 100);
-        if (diff > 5) {
-          insights.push({ icon: '&#x2191;', text: `<strong>${name}</strong>: wolumen +${diff}% vs ostatnio` });
-        } else if (diff < -5) {
-          insights.push({ icon: '&#x2193;', text: `<strong>${name}</strong>: wolumen ${diff}% vs ostatnio` });
-        }
-      }
-    }
-
-    // Progressions
-    const progressions = [];
-    for (const [name, data] of Object.entries(grouped)) {
-      const history = await analyzeExerciseHistory(data.exerciseId, 5);
-      const suggestion = suggestWeight(name, history);
-      if (suggestion && suggestion.direction !== 'maintain') {
-        progressions.push({ name, ...suggestion });
-      }
-    }
-
-    // RIR-based insights
-    if (avgRir !== null) {
-      const rirNum = parseFloat(avgRir);
-      if (rirNum <= 0.5) {
-        insights.push({ icon: '&#x26A0;', text: `Średni RIR ${avgRir} = trenujesz do porażki. Zostaw 1-2 RIR dla bezpiecznej progresji.` });
-      } else if (rirNum >= 3) {
-        insights.push({ icon: '&#x1F4AA;', text: `Średni RIR ${avgRir} = masz jeszcze dużo rezerwy. Następnym razem zwiększ ciężar lub powtórzenia.` });
-      } else {
-        insights.push({ icon: '&#x2705;', text: `Średni RIR ${avgRir} = idealny zakres (1-2). Świetna robota!` });
-      }
-    }
-
-    // Rest time insight
-    if (avgRestTime) {
-      if (avgRestTime > 240) {
-        insights.push({ icon: '&#x23F1;', text: `Średnia przerwa: ${Math.round(avgRestTime / 60)}min. Dla hipertrofii optymalnie 2-3 min.` });
-      } else if (avgRestTime < 60) {
-        insights.push({ icon: '&#x23F1;', text: `Średnia przerwa: ${avgRestTime}s. Compound mogą wymagać dłuższych przerw (2-3 min).` });
-      }
-    }
-
-    if (musclesWorked.length >= 5) {
-      insights.push({ icon: '&#x2705;', text: `Dobra równowaga! ${musclesWorked.length} grup mięśniowych.` });
-    }
-
-    // Microcycle tip
-    const mcInfo = await getMicrocycleInfo();
-    if (mcInfo.week === 3 && mcInfo.sessionsThisWeek >= 3) {
-      insights.push({ icon: '&#x1F4A4;', text: 'Następny tydzień to <strong>DELOAD</strong>. Automatycznie zmniejszymy ciężary o 15%.' });
-    }
-
-    workoutSummaryData = {
-      date: session.date,
-      duration: session.duration,
-      totalSets,
-      totalReps,
-      totalVolume,
-      avgRir,
-      avgRestTime,
-      musclesWorked,
-      exerciseDetails: grouped,
-      prs,
-      insights,
-      progressions,
-      readiness: session.readiness
-    };
-  }
-
-  function showSummaryOverlay() {
-    if (!workoutSummaryData) return;
-    const d = workoutSummaryData;
-
-    let html = `<div class="summary-overlay" id="workout-summary">
-      <div class="summary-content">
-        <div class="summary-header">
-          <div class="summary-icon">&#x1F99F;</div>
-          <div class="summary-title">Trening zakonczony!</div>
-          <div class="summary-date">${formatDate(d.date)}</div>
-        </div>
-
-        <div class="summary-stats">
-          <div class="summary-stat">
-            <div class="summary-stat-value">${d.duration ? Math.round(d.duration / 60) : 0}</div>
-            <div class="summary-stat-label">Minut</div>
-          </div>
-          <div class="summary-stat">
-            <div class="summary-stat-value">${d.totalSets}</div>
-            <div class="summary-stat-label">Serii</div>
-          </div>
-          <div class="summary-stat">
-            <div class="summary-stat-value">${Math.round(d.totalVolume)}</div>
-            <div class="summary-stat-label">Wolumen</div>
-          </div>
-          <div class="summary-stat">
-            <div class="summary-stat-value">${d.avgRir || '-'}</div>
-            <div class="summary-stat-label">Śr. RIR</div>
-          </div>
-        </div>`;
-
-    // Exercise breakdown
-    html += `<div class="summary-section">
-      <div class="summary-section-title">Cwiczenia</div>`;
-    for (const [name, data] of Object.entries(d.exerciseDetails)) {
-      const maxSet = data.sets.find(s => s.type === 'max');
-      const vol = data.sets.reduce((sum, s) => sum + s.weight * s.reps, 0);
-      const exRirs = data.sets.filter(s => s.rir != null).map(s => s.rir);
-      const exAvgRir = exRirs.length > 0 ? (exRirs.reduce((a, b) => a + b, 0) / exRirs.length).toFixed(1) : null;
-      html += `<div class="summary-exercise">
-        <div class="summary-ex-info">
-          <div class="summary-ex-name">${name}</div>
-          <div class="summary-ex-detail">${data.sets.length} serii &middot; ${Math.round(vol)}kg vol${maxSet ? ' &middot; MAX: ' + maxSet.weight + 'kg x' + maxSet.reps : ''}${exAvgRir ? ' &middot; RIR ' + exAvgRir : ''}</div>
-        </div>
+    // Next workout preview
+    html += `<div class="card"><div class="card-title">&#x1F4CB; Plan treningu ${nextType}</div>`;
+    for (const s of suggestions) {
+      const color = MUSCLE_COLORS[s.muscle] || '#888';
+      const typeLabel = s.type === 'main' ? 'MAIN' : s.type === 'secondary' ? 'SEC' : 'ISO';
+      const dirIcon = s.direction === 'up' ? '<span style="color:var(--green)">&#x2B06;</span>' :
+                      s.direction === 'down' ? '<span style="color:var(--red)">&#x2B07;</span>' :
+                      s.direction === 'deload' ? '<span style="color:var(--cyan)">&#x1F9CA;</span>' :
+                      s.direction === 'stagnation' ? '<span style="color:var(--orange)">&#x26A0;</span>' :
+                      s.direction === 'hold_failure' ? '<span style="color:var(--red)">&#x1F6D1;</span>' :
+                      '<span style="color:var(--text3)">&#x2796;</span>';
+      html += `<div class="plan-item">
+        <span class="muscle-badge" style="background:${color};font-size:8px;padding:2px 6px">${typeLabel}</span>
+        <span class="plan-item-name">${s.name}</span>
+        <span class="plan-item-weight">${s.weight}kg &times; ${s.sets}s ${dirIcon}</span>
       </div>`;
     }
     html += `</div>`;
 
-    // PRs
-    if (d.prs.length > 0) {
-      html += `<div class="summary-section">
-        <div class="summary-section-title">&#x1F3C6; Rekordy!</div>`;
-      for (const pr of d.prs) {
-        html += `<div class="summary-insight">
-          <div class="summary-insight-icon">&#x1F525;</div>
-          <div class="summary-insight-text"><strong>${pr.name}</strong>: nowy rekord ${pr.type === 'weight' ? 'ciezaru' : 'powtorzen'} &ndash; ${pr.value}</div>
+    // Last session
+    if (lastSession) {
+      const sets = await DB.getAllByIndex('sessionSets', 'sessionId', lastSession.id);
+      const totalVol = sets.reduce((s, st) => s + (st.weight||0) * (st.reps||0), 0);
+      const totalSets = sets.length;
+      const muscles = [...new Set(sets.map(s => {
+        const ex = exMap[s.exerciseId];
+        return ex ? ex.muscle : '?';
+      }))];
+      html += `<div class="card">
+        <div class="card-title">&#x1F4CA; Ostatni trening</div>
+        <div class="last-session-date">${formatDate(lastSession.date)} &middot; Trening ${lastSession.workoutType || '?'}</div>
+        <div class="last-session-summary">
+          <div class="stat-item"><div class="stat-value">${totalSets}</div><div class="stat-label">Serie</div></div>
+          <div class="stat-item"><div class="stat-value">${Math.round(totalVol)}</div><div class="stat-label">Volumen</div></div>
+          <div class="stat-item"><div class="stat-value">${muscles.length}</div><div class="stat-label">Partie</div></div>
+          <div class="stat-item"><div class="stat-value">${lastSession.duration || '?'}</div><div class="stat-label">Min</div></div>
+        </div>
+      </div>`;
+    }
+
+    // Weekly volume
+    const weeklyData = await getWeeklyMuscleVolume();
+    if (Object.keys(weeklyData.sets).length > 0) {
+      html += `<div class="card"><div class="card-title">&#x1F4AA; Objetosc tygodniowa</div>`;
+      for (const [muscle, sets] of Object.entries(weeklyData.sets)) {
+        const color = MUSCLE_COLORS[muscle] || '#888';
+        const vol = weeklyData.volume[muscle] || 0;
+        html += `<div class="volume-row">
+          <div class="volume-label"><span class="muscle-badge" style="background:${color};font-size:8px;padding:2px 6px">${muscle}</span></div>
+          <div class="progress-bar" style="flex:1"><div class="progress-fill" style="width:${Math.min(100, sets * 6)}%;background:${color}"></div></div>
+          <div class="volume-sets">${sets} serii</div>
+          <div class="volume-value">${Math.round(vol)} kg</div>
         </div>`;
       }
       html += `</div>`;
     }
 
-    // Progressions
-    if (d.progressions.length > 0) {
-      html += `<div class="summary-section">
-        <div class="summary-section-title">&#x1F4C8; Nastepny trening</div>`;
-      for (const p of d.progressions) {
-        const dirIcon = { up: '&#x2B06;', down: '&#x2B07;', stagnation: '&#x26A0;', fatigue: '&#x23F3;', reps_first: '&#x1F4AA;' };
-        html += `<div class="summary-insight">
-          <div class="summary-insight-icon">${dirIcon[p.direction] || '&#x2B06;'}</div>
-          <div class="summary-insight-text"><strong>${p.name}</strong>: ${p.reason}</div>
+    // Progression cards
+    const progSuggestions = suggestions.filter(s => s.direction !== 'start');
+    if (progSuggestions.length > 0) {
+      html += `<div style="padding:0 16px 4px"><div class="card-title">&#x1F4C8; Progresja cwiczen</div></div>`;
+      for (const s of progSuggestions) {
+        const iconBg = s.direction === 'up' ? 'rgba(var(--green-rgb),0.15)' :
+                       s.direction === 'down' ? 'rgba(var(--red-rgb),0.15)' :
+                       s.direction === 'stagnation' ? 'rgba(255,159,10,0.15)' :
+                       s.direction === 'hold_failure' ? 'rgba(var(--red-rgb),0.15)' :
+                       s.direction === 'deload' ? 'rgba(100,210,255,0.15)' :
+                       'rgba(255,255,255,0.05)';
+        const icon = s.direction === 'up' ? '&#x2B06;' :
+                     s.direction === 'down' ? '&#x2B07;' :
+                     s.direction === 'stagnation' ? '&#x26A0;' :
+                     s.direction === 'hold_failure' ? '&#x1F6D1;' :
+                     s.direction === 'deload' ? '&#x1F9CA;' : '&#x2796;';
+        html += `<div class="progression-card">
+          <div class="progression-icon" style="background:${iconBg}">${icon}</div>
+          <div class="progression-info">
+            <div class="progression-name">${s.name}</div>
+            <div class="progression-msg">${s.reason}</div>
+          </div>
         </div>`;
       }
-      html += `</div>`;
     }
 
-    // Insights
-    if (d.insights.length > 0) {
-      html += `<div class="summary-section">
-        <div class="summary-section-title">&#x1F4A1; Analiza</div>`;
-      for (const ins of d.insights) {
-        html += `<div class="summary-insight">
-          <div class="summary-insight-icon">${ins.icon}</div>
-          <div class="summary-insight-text">${ins.text}</div>
-        </div>`;
-      }
-      html += `</div>`;
-    }
-
-    html += `<button class="summary-close-btn" id="close-summary">Swietnie! Zamknij</button>
-      </div>
-    </div>`;
-
-    const el = document.createElement('div');
-    el.innerHTML = html;
-    document.body.appendChild(el.firstChild);
-
-    document.getElementById('close-summary')?.addEventListener('click', () => {
-      const overlay = document.getElementById('workout-summary');
-      if (overlay) overlay.remove();
-      workoutSummaryData = null;
-    });
+    return html;
   }
 
-  // ═══════════════════════════════════════════════════════════════
+  // ════════════════════════════════════════════
+  // READINESS CHECK (pre-workout)
+  // ════════════════════════════════════════════
+  function renderReadinessCheck() {
+    const rd = preWorkoutData || { sleep: 3, stress: 3, soreness: 3 };
+    const score = calculateReadiness(rd);
+    const label = getReadinessLabel(score);
+
+    function scaleButtons(key, val) {
+      const labels = key === 'sleep' ? ['Fatalny', 'Slaby', 'OK', 'Dobry', 'Swietny'] :
+                     key === 'stress' ? ['Max', 'Duzy', 'Sredni', 'Maly', 'Zero'] :
+                     ['Brutal', 'Duzy', 'Sredni', 'Lekki', 'Brak'];
+      return [1,2,3,4,5].map(v => `<button class="scale-btn ${val === v ? 'active' : ''}" data-readiness="${key}" data-val="${v}">
+        ${v}<span>${labels[v-1]}</span>
+      </button>`).join('');
+    }
+
+    return `<div class="readiness-screen">
+      <div class="readiness-header">
+        <div style="font-size:40px">${label.emoji}</div>
+        <h2>Jak sie czujesz?</h2>
+        <div class="readiness-subtitle">Pomoz mi dostosowac trening</div>
+      </div>
+      <div class="readiness-card">
+        <div class="readiness-label">&#x1F634; Jakos snu</div>
+        <div class="readiness-scale">${scaleButtons('sleep', rd.sleep)}</div>
+      </div>
+      <div class="readiness-card">
+        <div class="readiness-label">&#x1F612; Poziom stresu</div>
+        <div class="readiness-scale">${scaleButtons('stress', rd.stress)}</div>
+      </div>
+      <div class="readiness-card">
+        <div class="readiness-label">&#x1F4AA; Bolesnosc miesni</div>
+        <div class="readiness-scale">${scaleButtons('soreness', rd.soreness)}</div>
+      </div>
+      <div class="readiness-result">
+        <div class="readiness-score" style="color:${label.color}">Gotowos: ${label.text}</div>
+        <div class="readiness-hint">${score <= 2 ? 'Rozwaz lzejszy trening lub odpoczynek' : score >= 4 ? 'Super forma! Mozesz dac z siebie max!' : 'Standardowy trening bez zmian'}</div>
+      </div>
+      <button class="btn btn-primary" data-action="start-from-readiness" style="margin-bottom:10px">Zacznij trening</button>
+      <button class="btn btn-secondary" data-action="skip-workout">Wroc</button>
+    </div>`;
+  }
+
+  // ════════════════════════════════════════════
+  // ACTIVE WORKOUT
+  // ════════════════════════════════════════════
+  async function renderWorkout() {
+    if (!activeSession) return renderDashboard();
+    const plan = await DB.getAll('plan');
+    const planForType = plan.filter(p => p.workout === activeSession.workoutType).sort((a, b) => a.order - b.order);
+    const exercises = await DB.getAll('exercises');
+    const exMap = {};
+    exercises.forEach(e => { exMap[e.id] = e; });
+    const mcInfo = await getMicrocycleInfo();
+
+    // Collect all sets for this session
+    const allSessionSets = await DB.getAllByIndex('sessionSets', 'sessionId', activeSession.id);
+
+    // Group exercises in session (may include swapped exercises)
+    const sessionExercises = activeSession.exercises || planForType.map(p => ({
+      exerciseId: p.exerciseId,
+      exerciseName: p.exerciseName,
+      muscle: p.muscle,
+      exerciseType: p.exerciseType
+    }));
+
+    let totalSets = 0, completedSets = 0;
+    const exerciseData = [];
+
+    for (let i = 0; i < sessionExercises.length; i++) {
+      const se = sessionExercises[i];
+      const exSets = allSessionSets.filter(s => s.exerciseId === se.exerciseId).sort((a, b) => a.setNum - b.setNum);
+      const history = await analyzeExerciseHistory(se.exerciseId, 4);
+      const suggestion = suggestWeight(se.exerciseName, se.exerciseType, se.muscle, history, mcInfo.isDeload);
+      const prevSets = await getPrevSessionSets(se.exerciseId);
+
+      totalSets += suggestion.sets;
+      completedSets += exSets.filter(s => s.completed).length;
+
+      exerciseData.push({ ...se, sets: exSets, suggestion, prevSets, index: i });
+    }
+
+    const progress = totalSets > 0 ? Math.round((completedSets / totalSets) * 100) : 0;
+    const elapsed = activeSession.startTime ? Math.floor((Date.now() - activeSession.startTime) / 60000) : 0;
+
+    let html = `<div class="workout-header">
+      <button class="back-btn" data-action="end-workout-confirm">&#x2190; Zakoncz</button>
+      <div style="text-align:center">
+        <div style="font-size:16px;font-weight:800">Trening ${activeSession.workoutType}</div>
+        <div style="font-size:11px;color:var(--text3)">${elapsed} min</div>
+      </div>
+      <div class="workout-progress">${progress}%</div>
+    </div>
+    <div class="progress-bar" style="margin:0 12px 8px;height:4px"><div class="progress-fill" style="width:${progress}%;background:linear-gradient(90deg,var(--accent),var(--green))"></div></div>`;
+
+    for (const ed of exerciseData) {
+      const color = MUSCLE_COLORS[ed.muscle] || '#888';
+      const cls = getExerciseClass({ type: ed.exerciseType, muscle: ed.muscle });
+      const typeLabel = ed.exerciseType === 'main' ? 'MAIN' : ed.exerciseType === 'secondary' ? 'SEC' : 'ISO';
+
+      html += `<div class="exercise-card">
+        <div class="exercise-header">
+          <span class="muscle-badge" style="background:${color}">${typeLabel}</span>
+          <span class="exercise-name">${ed.exerciseName}</span>
+          <button class="swap-btn" data-swap="${ed.index}">${SWAP_ICON} Zamien</button>
+        </div>
+        <div class="suggestion-bar">${ed.suggestion.reason} &middot; Przerwa: ${Math.floor(ed.suggestion.restTime/60)}:${(ed.suggestion.restTime%60).toString().padStart(2,'0')}</div>
+        <div class="set-header-row">
+          <div>SET</div><div>PLAN</div><div>KG</div><div>POWT</div><div>RIR</div><div></div>
+        </div>`;
+
+      const numSets = ed.suggestion.sets;
+      for (let s = 0; s < numSets; s++) {
+        const existingSet = ed.sets.find(st => st.setNum === s);
+        const isCompleted = existingSet && existingSet.completed;
+        const isActive = !isCompleted && (s === 0 || ed.sets.find(st => st.setNum === s - 1 && st.completed));
+        const prevSet = ed.prevSets[s];
+        const planWeight = ed.suggestion.weight;
+        const planReps = ed.suggestion.reps;
+
+        const weight = existingSet ? existingSet.weight : planWeight;
+        const reps = existingSet ? existingSet.reps : '';
+        const rir = existingSet && existingSet.rir != null ? existingSet.rir : '';
+
+        // Comparison with previous
+        let compHtml = '';
+        if (prevSet && existingSet && isCompleted) {
+          const diff = (existingSet.weight * existingSet.reps) - (prevSet.weight * prevSet.reps);
+          if (diff > 0) compHtml = `<span class="comparison better">+${Math.round(diff)}</span>`;
+          else if (diff < 0) compHtml = `<span class="comparison worse">${Math.round(diff)}</span>`;
+          else compHtml = `<span class="comparison same">=</span>`;
+        }
+
+        html += `<div class="set-row ${isCompleted ? 'completed' : ''} ${isActive ? 'active-set' : ''}">
+          <div class="set-type" style="color:${color}">${s + 1}</div>
+          <div class="set-planned">${planWeight}kg &times; ${planReps}</div>
+          <input class="set-input" type="number" inputmode="decimal" step="0.5"
+            value="${weight}" data-ex="${ed.index}" data-set="${s}" data-field="weight"
+            ${isCompleted ? 'disabled' : ''} placeholder="kg">
+          <input class="set-input" type="number" inputmode="numeric"
+            value="${reps}" data-ex="${ed.index}" data-set="${s}" data-field="reps"
+            ${isCompleted ? 'disabled' : ''} placeholder="reps">
+          <select class="rir-select ${isCompleted ? 'done' : ''}" data-ex="${ed.index}" data-set="${s}" data-field="rir"
+            ${isCompleted ? 'disabled' : ''}>
+            <option value="">RIR</option>
+            <option value="0" ${rir === 0 ? 'selected' : ''}>0</option>
+            <option value="1" ${rir === 1 ? 'selected' : ''}>1</option>
+            <option value="2" ${rir === 2 ? 'selected' : ''}>2</option>
+            <option value="3" ${rir === 3 ? 'selected' : ''}>3</option>
+            <option value="4" ${rir === 4 ? 'selected' : ''}>4</option>
+          </select>
+          <button class="set-check ${isCompleted ? 'done' : ''}" data-confirm="${ed.index}" data-set="${s}">
+            ${isCompleted ? '&#x2713;' : '&#x25CB;'}
+          </button>
+        </div>`;
+
+        if (prevSet && !isCompleted) {
+          html += `<div class="prev-result">Poprzednio: ${prevSet.weight}kg &times; ${prevSet.reps} ${prevSet.rir != null ? '(RIR '+prevSet.rir+')' : ''} ${compHtml}</div>`;
+        } else if (isCompleted && compHtml) {
+          html += `<div class="prev-result">Vol delta: ${compHtml}</div>`;
+        }
+      }
+
+      // Note area
+      html += `<div class="note-area">
+        <textarea class="note-input" rows="1" placeholder="Notatka (technika, forma, kontuzja...)" data-note-ex="${ed.exerciseId}"></textarea>
+      </div>`;
+
+      html += `</div>`;
+    }
+
+    html += `<div style="padding:16px">
+      <button class="btn btn-primary" data-action="end-workout" style="margin-bottom:10px">&#x1F3C1; Zakoncz trening</button>
+    </div>`;
+    html += `<div style="height:120px"></div>`;
+
+    return html;
+  }
+
+  // ════════════════════════════════════════════
   // HISTORY
-  // ═══════════════════════════════════════════════════════════════
+  // ════════════════════════════════════════════
   async function renderHistory() {
-    const sessions = await getLastSessions(50);
+    const sessions = await getLastSessions(20);
     let html = `<div class="header"><h1>Historia</h1></div>`;
 
     if (sessions.length === 0) {
-      return html + `<div class="empty-state"><div class="empty-state-icon">&#x1F4CB;</div><div class="empty-state-text">Brak sesji treningowych</div></div>`;
+      html += `<div class="empty-state"><div class="empty-state-icon">&#x1F4CB;</div><div class="empty-state-text">Brak treningow</div></div>`;
+      return html;
     }
+
+    html += `<div class="card" style="padding:0;overflow:hidden">`;
+    const exercises = await DB.getAll('exercises');
+    const exMap = {};
+    exercises.forEach(e => { exMap[e.id] = e; });
 
     for (const s of sessions) {
       const sets = await DB.getAllByIndex('sessionSets', 'sessionId', s.id);
-      const exercises = [...new Set(sets.map(st => st.exerciseName))];
-      const volume = sets.reduce((sum, st) => sum + st.weight * st.reps, 0);
-      const rirs = sets.filter(st => st.rir != null).map(st => st.rir);
-      const avgRir = rirs.length > 0 ? (rirs.reduce((a, b) => a + b, 0) / rirs.length).toFixed(1) : null;
-
-      html += `<div class="session-item" data-action="show-session" data-session-id="${s.id}">
-        <div class="session-date">${formatDate(s.date)} ${s.isDeload ? '<span class="deload-badge" style="font-size:10px">DELOAD</span>' : ''}</div>
-        <div class="session-summary">${exercises.length} cwiczen &middot; ${sets.length} serii &middot; ${Math.round(volume)}kg${avgRir ? ' &middot; RIR ' + avgRir : ''} &middot; ${s.duration ? Math.round(s.duration / 60) + 'min' : '-'}</div>
+      const totalVol = sets.reduce((sum, st) => sum + (st.weight||0) * (st.reps||0), 0);
+      const totalSets = sets.length;
+      const exNames = [...new Set(sets.map(st => {
+        const ex = exMap[st.exerciseId];
+        return ex ? ex.name : '?';
+      }))];
+      html += `<div class="session-item" data-session="${s.id}">
+        <div class="session-date">${formatDate(s.date)} &middot; Trening ${s.workoutType || '?'} ${s.duration ? '&middot; ' + s.duration + ' min' : ''}</div>
+        <div class="session-summary">${totalSets} serii &middot; ${Math.round(totalVol)} kg volume &middot; ${exNames.slice(0,3).join(', ')}${exNames.length > 3 ? '...' : ''}</div>
       </div>`;
     }
+    html += `</div>`;
     return html;
   }
 
@@ -1031,706 +559,820 @@
     if (!selectedHistorySession) return renderHistory();
     const session = await DB.get('sessions', selectedHistorySession);
     if (!session) return renderHistory();
+    const allSets = await DB.getAllByIndex('sessionSets', 'sessionId', session.id);
+    const exercises = await DB.getAll('exercises');
+    const exMap = {};
+    exercises.forEach(e => { exMap[e.id] = e; });
 
-    const sets = await DB.getAllByIndex('sessionSets', 'sessionId', session.id);
+    // Group sets by exercise
     const grouped = {};
-    sets.forEach(s => {
-      if (!grouped[s.exerciseName]) grouped[s.exerciseName] = [];
-      grouped[s.exerciseName].push(s);
-    });
-
-    const allExercises = await DB.getAll('exercises');
+    for (const s of allSets) {
+      if (!grouped[s.exerciseId]) grouped[s.exerciseId] = [];
+      grouped[s.exerciseId].push(s);
+    }
 
     let html = `<div class="header">
-      <button class="back-btn" data-action="back-history">&#x2190; Wroc</button>
-      <h1>${formatDate(session.date)}</h1>
+      <button class="back-btn" data-action="back-history">&#x2190; Wstecz</button>
+      <h1>Trening ${session.workoutType || ''}</h1>
+      <div></div>
     </div>
-    <div style="display:flex; gap:8px; padding:0 16px 12px;">
-      <button class="btn btn-sm btn-secondary" data-action="edit-session" data-session-id="${session.id}" style="flex:1">Edytuj</button>
-      <button class="btn btn-sm btn-danger" data-action="delete-session" data-session-id="${session.id}" style="flex:1">Usun</button>
+    <div class="card" style="padding:12px 16px">
+      <div style="font-size:13px;color:var(--text2)">${formatDate(session.date)} ${session.duration ? '&middot; ' + session.duration + ' min' : ''}</div>
     </div>`;
 
-    // Show readiness if available
-    if (session.readiness) {
-      const info = getReadinessLabel(session.readiness);
-      html += `<div style="padding:0 16px 12px;font-size:13px;color:var(--text2)">${info.emoji} Gotowość: ${session.readiness}/5 ${session.isDeload ? '&middot; DELOAD' : ''}</div>`;
-    }
+    for (const [exId, sets] of Object.entries(grouped)) {
+      const ex = exMap[exId];
+      const exName = ex ? ex.name : 'Cwiczenie #' + exId;
+      const color = ex ? (MUSCLE_COLORS[ex.muscle] || '#888') : '#888';
+      sets.sort((a, b) => a.setNum - b.setNum);
 
-    if (editingSession === session.id) {
-      for (const [name, exSets] of Object.entries(grouped)) {
-        const muscle = allExercises.find(e => e.name === name)?.muscle || '';
-        html += `<div class="session-detail-ex">
-          <h3><span class="muscle-badge" style="background:${MUSCLE_COLORS[muscle] || '#666'}">${muscle}</span> ${name}</h3>`;
-        for (const s of exSets) {
-          html += `<div style="display:flex; gap:8px; align-items:center; padding:6px 0;">
-            <span class="set-type" style="color:${SET_TYPES[s.type]?.color || '#666'}; width:30px;">${SET_TYPES[s.type]?.short || '?'}</span>
-            <input class="set-input" type="number" inputmode="decimal" step="0.5" value="${s.weight}" data-edit-set-id="${s.id}" data-edit-field="weight" style="width:70px;">
-            <span style="color:var(--text3)">kg x</span>
-            <input class="set-input" type="number" inputmode="numeric" value="${s.reps}" data-edit-set-id="${s.id}" data-edit-field="reps" style="width:60px;">
-            <span style="color:var(--text3)">RIR</span>
-            <input class="set-input" type="number" inputmode="numeric" value="${s.rir != null ? s.rir : ''}" data-edit-set-id="${s.id}" data-edit-field="rir" style="width:50px;">
-          </div>`;
-        }
-        html += `</div>`;
-      }
-      html += `<div style="padding:12px 16px;">
-        <button class="btn btn-primary" data-action="save-session-edit" data-session-id="${session.id}">Zapisz zmiany</button>
-      </div>`;
-    } else {
-      for (const [name, exSets] of Object.entries(grouped)) {
-        const muscle = allExercises.find(e => e.name === name)?.muscle || '';
-        html += `<div class="session-detail-ex">
-          <h3><span class="muscle-badge" style="background:${MUSCLE_COLORS[muscle] || '#666'}">${muscle}</span> ${name}</h3>
-          <div class="session-sets-grid">
-            ${exSets.map(s => `<div class="session-set-chip">
-              <div style="font-size:10px;color:${SET_TYPES[s.type]?.color || '#666'};font-weight:700">${SET_TYPES[s.type]?.short || '?'}</div>
-              <div style="font-weight:700">${s.weight}kg x ${s.reps}</div>
-              ${s.rir != null ? `<div style="font-size:10px;color:var(--text3)">RIR ${s.rir}</div>` : ''}
-            </div>`).join('')}
-          </div>
+      html += `<div class="session-detail-ex">
+        <h3><span class="muscle-badge" style="background:${color}">${ex ? ex.muscle : '?'}</span> ${exName}</h3>
+        <div class="session-sets-grid">`;
+
+      for (const s of sets) {
+        html += `<div class="session-set-chip">
+          <div style="font-weight:800;font-size:16px">${s.weight}kg</div>
+          <div style="font-size:12px;color:var(--text2)">${s.reps} powt ${s.rir != null ? '&middot; RIR ' + s.rir : ''}</div>
         </div>`;
-
-        const notes = await DB.getAllByIndex('notes', 'sessionExercise', [session.id, exSets[0]?.exerciseId]);
-        if (notes.length > 0) {
-          html += `<div style="padding:4px 16px 8px; font-size:12px; color:var(--text3); font-style:italic;">&#x1F4DD; ${notes[0].text}</div>`;
-        }
       }
+      html += `</div></div>`;
     }
 
-    return html;
-  }
-
-  // ═══════════════════════════════════════════════════════════════
-  // CHARTS
-  // ═══════════════════════════════════════════════════════════════
-  async function renderCharts() {
-    const exercises = await DB.getAll('exercises');
-    const plan = await DB.getAll('plan');
-    const planExIds = plan.map(p => p.exerciseId);
-    // Show plan exercises first, then all
-    const sortedEx = [...exercises].sort((a, b) => {
-      const aInPlan = planExIds.includes(a.id) ? 0 : 1;
-      const bInPlan = planExIds.includes(b.id) ? 0 : 1;
-      return aInPlan - bInPlan;
-    });
-    if (!chartExercise && sortedEx.length > 0) chartExercise = sortedEx[0].id;
-
-    let html = `<div class="header"><h1>Wykresy</h1></div>`;
-
-    html += `<div class="chart-container">
-      <select class="chart-select" data-action="chart-select">
-        ${sortedEx.map(e => `<option value="${e.id}" ${e.id === chartExercise ? 'selected' : ''}>${e.name} ${planExIds.includes(e.id) ? '★' : ''}</option>`).join('')}
-      </select>
-      <div class="card-title">Progresja ciezaru (seria MAX)</div>
-      <div class="chart-canvas" id="weight-chart"></div>
-    </div>`;
-
-    html += `<div class="chart-container">
-      <div class="card-title">RIR w czasie</div>
-      <div class="chart-canvas" id="rir-chart"></div>
-    </div>`;
-
-    html += `<div class="chart-container">
-      <div class="card-title">Tygodniowy wolumen</div>
-      <div class="chart-canvas" id="volume-chart"></div>
-    </div>`;
-
-    return html;
-  }
-
-  async function drawCharts() {
-    if (currentScreen !== 'charts') return;
-
-    if (chartExercise) {
-      const history = await analyzeExerciseHistory(chartExercise, 20);
-
-      // Weight chart
-      const weightData = history.map((h, i) => ({
-        x: i, y: h.maxWeight, label: `${h.maxWeight}kg`
-      }));
-      drawLineChart('weight-chart', weightData, 'kg');
-
-      // RIR chart
-      const rirData = history.filter(h => h.avgRir != null).map((h, i) => ({
-        x: i, y: h.avgRir, label: `RIR ${h.avgRir.toFixed(1)}`
-      }));
-      drawLineChart('rir-chart', rirData, 'RIR', 'var(--cyan)');
-    }
-
-    // Volume chart
-    const sessions = await getLastSessions(8);
-    sessions.reverse();
-    const volData = [];
-    for (const s of sessions) {
-      const sets = await DB.getAllByIndex('sessionSets', 'sessionId', s.id);
-      const vol = sets.reduce((sum, st) => sum + st.weight * st.reps, 0);
-      volData.push({ x: volData.length, y: vol, label: formatDate(s.date).slice(0, 5) });
-    }
-    drawBarChart('volume-chart', volData, 'kg');
-  }
-
-  function drawLineChart(containerId, data, unit, color) {
-    const container = document.getElementById(containerId);
-    if (!container || data.length === 0) {
-      if (container) container.innerHTML = '<div class="empty-state-text" style="padding:40px 0">Brak danych</div>';
-      return;
-    }
-
-    const w = container.clientWidth;
-    const h = 200;
-    const pad = { top: 20, right: 20, bottom: 30, left: 40 };
-    const iw = w - pad.left - pad.right;
-    const ih = h - pad.top - pad.bottom;
-
-    const minY = Math.min(...data.map(d => d.y)) * 0.9;
-    const maxY = Math.max(...data.map(d => d.y)) * 1.1;
-
-    const scaleX = (i) => pad.left + (i / Math.max(data.length - 1, 1)) * iw;
-    const scaleY = (v) => pad.top + ih - ((v - minY) / (maxY - minY || 1)) * ih;
-
-    const points = data.map((d, i) => `${scaleX(i)},${scaleY(d.y)}`).join(' ');
-    const areaPoints = `${scaleX(0)},${pad.top + ih} ` + points + ` ${scaleX(data.length - 1)},${pad.top + ih}`;
-    const gradId = containerId + '-grad';
-
-    let svg = `<svg class="chart-svg" viewBox="0 0 ${w} ${h}">`;
-    svg += `<defs><linearGradient id="${gradId}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="${color || 'var(--accent)'}" stop-opacity="0.3"/><stop offset="100%" stop-color="${color || 'var(--accent)'}" stop-opacity="0"/></linearGradient></defs>`;
-    for (let i = 0; i <= 4; i++) {
-      const y = pad.top + (ih / 4) * i;
-      const val = maxY - ((maxY - minY) / 4) * i;
-      svg += `<line class="chart-grid" x1="${pad.left}" y1="${y}" x2="${w - pad.right}" y2="${y}"/>`;
-      svg += `<text class="chart-label" x="${pad.left - 5}" y="${y + 4}" text-anchor="end">${Math.round(val * 10) / 10}</text>`;
-    }
-    svg += `<polygon points="${areaPoints}" fill="url(#${gradId})"/>`;
-    svg += `<polyline class="chart-line" points="${points}" style="stroke:${color || 'var(--accent)'}"/>`;
-    data.forEach((d, i) => {
-      svg += `<circle class="chart-dot" cx="${scaleX(i)}" cy="${scaleY(d.y)}" r="4" style="fill:${color || 'var(--accent)'}"/>`;
-    });
-    svg += `</svg>`;
-    container.innerHTML = svg;
-  }
-
-  function drawBarChart(containerId, data, unit) {
-    const container = document.getElementById(containerId);
-    if (!container || data.length === 0) {
-      if (container) container.innerHTML = '<div class="empty-state-text" style="padding:40px 0">Brak danych</div>';
-      return;
-    }
-
-    const w = container.clientWidth;
-    const h = 200;
-    const pad = { top: 20, right: 20, bottom: 30, left: 50 };
-    const iw = w - pad.left - pad.right;
-    const ih = h - pad.top - pad.bottom;
-
-    const maxY = Math.max(...data.map(d => d.y)) * 1.1;
-    const barW = Math.min(30, iw / data.length - 4);
-
-    let svg = `<svg class="chart-svg" viewBox="0 0 ${w} ${h}">`;
-    svg += `<defs><linearGradient id="barGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="var(--accent)"/><stop offset="100%" stop-color="var(--accent)" stop-opacity="0.4"/></linearGradient></defs>`;
-    data.forEach((d, i) => {
-      const x = pad.left + (iw / data.length) * i + (iw / data.length - barW) / 2;
-      const barH = (d.y / maxY) * ih;
-      const y = pad.top + ih - barH;
-      svg += `<rect x="${x}" y="${y}" width="${barW}" height="${barH}" rx="4" fill="url(#barGrad)"/>`;
-      svg += `<text class="chart-label" x="${x + barW / 2}" y="${h - 5}" text-anchor="middle">${d.label || ''}</text>`;
-      svg += `<text class="chart-label" x="${x + barW / 2}" y="${y - 5}" text-anchor="middle">${Math.round(d.y)}</text>`;
-    });
-    svg += `</svg>`;
-    container.innerHTML = svg;
-  }
-
-  // ═══════════════════════════════════════════════════════════════
-  // DIET
-  // ═══════════════════════════════════════════════════════════════
-  async function renderDiet() {
-    const entries = await getTodayDiet();
-    const goal = await getDietGoal();
-    const totals = {
-      kcal: entries.reduce((s, e) => s + (e.kcal || 0), 0),
-      protein: entries.reduce((s, e) => s + (e.protein || 0), 0),
-      fat: entries.reduce((s, e) => s + (e.fat || 0), 0),
-      carbs: entries.reduce((s, e) => s + (e.carbs || 0), 0)
-    };
-
-    let html = `<div class="header"><h1>Dieta</h1><span class="header-sub">${today()}</span></div>`;
-
-    html += `<div class="diet-summary">
-      ${renderMacroCard('Kalorie', totals.kcal, goal.kcal, 'kcal', 'var(--red)')}
-      ${renderMacroCard('Bialko', totals.protein, goal.protein, 'g', 'var(--green)')}
-      ${renderMacroCard('Tluszcz', totals.fat, goal.fat, 'g', 'var(--orange)')}
-      ${renderMacroCard('Wegle', totals.carbs, goal.carbs, 'g', 'var(--blue)')}
-    </div>`;
-
-    html += `<div class="card"><div class="card-title">Dodaj posilek</div>
-      <div class="add-meal-form">
-        <input type="text" id="meal-name" placeholder="Nazwa posilku">
-        <div class="macro-inputs">
-          <input type="number" id="meal-kcal" placeholder="kcal" inputmode="numeric">
-          <input type="number" id="meal-protein" placeholder="bialko (g)" inputmode="numeric">
-          <input type="number" id="meal-fat" placeholder="tluszcz (g)" inputmode="numeric">
-          <input type="number" id="meal-carbs" placeholder="wegle (g)" inputmode="numeric">
-        </div>
-        <button class="btn btn-primary" data-action="add-meal">Dodaj posilek</button>
-      </div>
-    </div>`;
-
-    if (entries.length > 0) {
-      html += `<div class="card"><div class="card-title">Dzisiejsze posilki</div>`;
-      for (const e of entries) {
-        html += `<div class="meal-item">
-          <div>
-            <div class="meal-name">${e.name}</div>
-            <div class="meal-macros">${e.kcal}kcal &middot; B:${e.protein}g &middot; T:${e.fat}g &middot; W:${e.carbs}g</div>
-          </div>
-          <button class="delete-btn" data-action="delete-meal" data-meal-id="${e.id}">&#x2715;</button>
-        </div>`;
+    // Notes
+    const notes = await DB.getAll('notes');
+    const sessionNotes = notes.filter(n => n.sessionId === session.id);
+    if (sessionNotes.length > 0) {
+      html += `<div class="card"><div class="card-title">Notatki</div>`;
+      for (const n of sessionNotes) {
+        const ex = exMap[n.exerciseId];
+        html += `<div style="padding:6px 0;font-size:13px"><strong>${ex ? ex.name : '?'}:</strong> ${n.text}</div>`;
       }
       html += `</div>`;
     }
 
-    html += `<div class="card"><div class="card-title">Ostatnie 7 dni</div>`;
-    for (let d = 1; d <= 7; d++) {
-      const date = new Date();
-      date.setDate(date.getDate() - d);
-      const dateStr = date.toISOString().slice(0, 10);
-      const dayEntries = await DB.getAllByIndex('diet', 'date', dateStr);
-      const dayProtein = dayEntries.reduce((s, e) => s + (e.protein || 0), 0);
-      const dayKcal = dayEntries.reduce((s, e) => s + (e.kcal || 0), 0);
-      html += `<div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--glass-border);font-size:13px;">
-        <span style="color:var(--text2)">${formatDate(dateStr)}</span>
-        <span style="font-variant-numeric:tabular-nums">${dayKcal} kcal &middot; ${dayProtein}g B</span>
+    return html;
+  }
+
+  // ════════════════════════════════════════════
+  // CHARTS
+  // ════════════════════════════════════════════
+  async function renderCharts() {
+    const exercises = await DB.getAll('exercises');
+    const planExercises = exercises.filter(e => e.workout !== null);
+
+    if (!chartExercise && planExercises.length > 0) {
+      chartExercise = planExercises[0].id;
+    }
+
+    let html = `<div class="header"><h1>Wykresy</h1></div>`;
+    html += `<div class="chart-container">
+      <select class="chart-select" data-action="change-chart">
+        ${planExercises.map(e => `<option value="${e.id}" ${chartExercise === e.id ? 'selected' : ''}>${e.name} (${e.workout})</option>`).join('')}
+      </select>
+      <div class="chart-canvas" id="chart-canvas"></div>
+    </div>`;
+
+    // After render, draw chart
+    setTimeout(() => drawChart(chartExercise), 50);
+    return html;
+  }
+
+  async function drawChart(exerciseId) {
+    const container = document.getElementById('chart-canvas');
+    if (!container) return;
+
+    const history = await analyzeExerciseHistory(exerciseId, 12);
+    if (history.length < 2) {
+      container.innerHTML = `<div class="empty-state" style="padding:40px 0"><div class="empty-state-text">Za malo danych (min. 2 treningi)</div></div>`;
+      return;
+    }
+
+    const weights = history.map(h => h.avgWeight);
+    const volumes = history.map(h => h.volume);
+    const dates = history.map(h => {
+      const d = new Date(h.date);
+      return `${d.getDate()}.${d.getMonth()+1}`;
+    });
+
+    const maxW = Math.max(...weights);
+    const minW = Math.min(...weights);
+    const maxV = Math.max(...volumes);
+    const rangeW = maxW - minW || 1;
+
+    const W = 340, H = 180, PAD = 30;
+    const plotW = W - PAD * 2, plotH = H - PAD * 2;
+
+    const pts = weights.map((w, i) => ({
+      x: PAD + (i / (weights.length - 1)) * plotW,
+      y: PAD + plotH - ((w - minW) / rangeW) * plotH
+    }));
+
+    const pathD = pts.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ');
+
+    let svg = `<svg class="chart-svg" viewBox="0 0 ${W} ${H}">
+      <defs>
+        <linearGradient id="lineGrad" x1="0" y1="0" x2="1" y2="0">
+          <stop offset="0%" stop-color="var(--accent)"/>
+          <stop offset="100%" stop-color="var(--green)"/>
+        </linearGradient>
+        <linearGradient id="areaGrad" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="var(--accent)" stop-opacity="0.2"/>
+          <stop offset="100%" stop-color="var(--accent)" stop-opacity="0"/>
+        </linearGradient>
+      </defs>`;
+
+    // Grid lines
+    for (let i = 0; i <= 4; i++) {
+      const y = PAD + (i / 4) * plotH;
+      const val = maxW - (i / 4) * rangeW;
+      svg += `<line x1="${PAD}" y1="${y}" x2="${W - PAD}" y2="${y}" class="chart-grid"/>`;
+      svg += `<text x="${PAD - 4}" y="${y + 3}" class="chart-label" text-anchor="end">${val.toFixed(1)}</text>`;
+    }
+
+    // Date labels
+    for (let i = 0; i < dates.length; i++) {
+      if (i % Math.ceil(dates.length / 6) === 0 || i === dates.length - 1) {
+        svg += `<text x="${pts[i].x}" y="${H - 4}" class="chart-label" text-anchor="middle">${dates[i]}</text>`;
+      }
+    }
+
+    // Area fill
+    svg += `<path d="${pathD} L ${pts[pts.length-1].x} ${PAD + plotH} L ${pts[0].x} ${PAD + plotH} Z" fill="url(#areaGrad)"/>`;
+    // Line
+    svg += `<path d="${pathD}" class="chart-line"/>`;
+    // Dots
+    for (const p of pts) {
+      svg += `<circle cx="${p.x}" cy="${p.y}" r="4" class="chart-dot"/>`;
+    }
+
+    svg += `</svg>`;
+    svg += `<div style="text-align:center;padding-top:8px;font-size:11px;color:var(--text3)">Ciezar (kg) &middot; ${history.length} sesji</div>`;
+
+    container.innerHTML = svg;
+  }
+
+  // ════════════════════════════════════════════
+  // DIET
+  // ════════════════════════════════════════════
+  async function renderDiet() {
+    const goal = await getDietGoal();
+    const meals = await getTodayDiet();
+    const totals = { kcal: 0, protein: 0, fat: 0, carbs: 0 };
+    meals.forEach(m => {
+      totals.kcal += m.kcal || 0;
+      totals.protein += m.protein || 0;
+      totals.fat += m.fat || 0;
+      totals.carbs += m.carbs || 0;
+    });
+
+    const macros = [
+      { key: 'kcal', label: 'Kalorie', unit: '', color: 'var(--accent)', target: goal.kcal },
+      { key: 'protein', label: 'Bialko', unit: 'g', color: 'var(--green)', target: goal.protein },
+      { key: 'fat', label: 'Tluszcze', unit: 'g', color: 'var(--orange)', target: goal.fat },
+      { key: 'carbs', label: 'Wegle', unit: 'g', color: 'var(--blue)', target: goal.carbs }
+    ];
+
+    let html = `<div class="header"><h1>Dieta</h1><div class="header-sub">${formatDate(today())}</div></div>`;
+    html += `<div class="diet-summary">`;
+    for (const m of macros) {
+      const pct = m.target[1] > 0 ? Math.min(100, Math.round((totals[m.key] / m.target[1]) * 100)) : 0;
+      html += `<div class="macro-card">
+        <div class="macro-value" style="color:${m.color}">${totals[m.key]}${m.unit}</div>
+        <div class="macro-label">${m.label}</div>
+        <div class="progress-bar" style="margin-top:8px"><div class="progress-fill" style="width:${pct}%;background:${m.color}"></div></div>
+        <div class="macro-target">${m.target[0]}–${m.target[1]}${m.unit}</div>
       </div>`;
     }
     html += `</div>`;
 
-    return html;
-  }
-
-  function renderMacroCard(label, value, range, unit, color) {
-    const pct = Math.min(100, Math.round((value / range[1]) * 100));
-    const inRange = value >= range[0] && value <= range[1];
-    return `<div class="macro-card">
-      <div class="macro-value" style="color:${inRange ? 'var(--green)' : color}">${value}</div>
-      <div class="macro-label">${label}</div>
-      <div class="progress-bar" style="margin:6px 0"><div class="progress-fill" style="width:${pct}%;background:${color}"></div></div>
-      <div class="macro-target">${range[0]}-${range[1]}${unit}</div>
-    </div>`;
-  }
-
-  // ═══════════════════════════════════════════════════════════════
-  // SETTINGS
-  // ═══════════════════════════════════════════════════════════════
-  async function renderSettings() {
-    const restTime = await getRestTime();
-    const dietGoal = await getDietGoal();
-    const mcInfo = await getMicrocycleInfo();
-
-    return `<div class="header"><h1>Ustawienia</h1></div>
-      <div class="card">
-        <div class="card-title">Trening</div>
-        <div class="setting-row">
-          <span class="setting-label">Przerwa (sekundy)</span>
-          <input class="setting-value" type="number" id="rest-time" value="${restTime}" inputmode="numeric">
-        </div>
-        <div style="padding:8px 0">
-          <button class="btn btn-secondary" data-action="save-rest-time">Zapisz</button>
-        </div>
-      </div>
-      <div class="card">
-        <div class="card-title">Mikrocykl</div>
-        <div class="setting-row">
-          <span class="setting-label">${mcInfo.weekLabel}</span>
-          <button class="btn btn-sm btn-secondary" data-action="reset-microcycle">Resetuj cykl</button>
-        </div>
-        <div style="font-size:12px;color:var(--text3);padding:4px 0">3 tygodnie progresji + 1 tydzień deload. Automatyczny cykl.</div>
-      </div>
-      <div class="card">
-        <div class="card-title">Plan treningowy</div>
-        <button class="btn btn-secondary" data-action="edit-plan">Edytuj plan FBW</button>
-      </div>
-      <div class="card">
-        <div class="card-title">Cele dietetyczne</div>
-        <div class="setting-row">
-          <span class="setting-label">Kalorie (min)</span>
-          <input class="setting-value" type="number" id="goal-kcal-min" value="${dietGoal.kcal[0]}" inputmode="numeric">
-        </div>
-        <div class="setting-row">
-          <span class="setting-label">Kalorie (max)</span>
-          <input class="setting-value" type="number" id="goal-kcal-max" value="${dietGoal.kcal[1]}" inputmode="numeric">
-        </div>
-        <div class="setting-row">
-          <span class="setting-label">Bialko (min)</span>
-          <input class="setting-value" type="number" id="goal-protein-min" value="${dietGoal.protein[0]}" inputmode="numeric">
-        </div>
-        <div class="setting-row">
-          <span class="setting-label">Bialko (max)</span>
-          <input class="setting-value" type="number" id="goal-protein-max" value="${dietGoal.protein[1]}" inputmode="numeric">
-        </div>
-        <div style="padding:8px 0">
-          <button class="btn btn-secondary" data-action="save-diet-goals">Zapisz cele</button>
-        </div>
-      </div>
-      <div class="card">
-        <div class="card-title">Baza cwiczen</div>
-        <button class="btn btn-secondary" data-action="add-exercise-form">Dodaj cwiczenie</button>
-        <div id="add-exercise-area"></div>
-      </div>`;
-  }
-
-  // ═══════════════════════════════════════════════════════════════
-  // PLAN EDITOR
-  // ═══════════════════════════════════════════════════════════════
-  async function renderPlanEditor() {
-    const plan = await DB.getAll('plan');
-    plan.sort((a, b) => a.order - b.order);
-    const exercises = await DB.getAll('exercises');
-
-    let html = `<div class="header">
-      <button class="back-btn" data-action="back-settings">&#x2190; Wroc</button>
-      <h1>Plan FBW</h1>
-    </div>`;
-
-    for (const p of plan) {
-      html += `<div class="plan-exercise" data-plan-id="${p.id}">
-        <div class="plan-ex-header">
-          <div>
-            <span class="muscle-badge" style="background:${MUSCLE_COLORS[p.muscle] || '#666'}">${p.muscle}</span>
-            <strong style="margin-left:8px">${p.exerciseName}</strong>
-          </div>
-          <button class="delete-btn" data-action="delete-plan-exercise" data-plan-id="${p.id}">&#x2715;</button>
-        </div>`;
-
-      for (let si = 0; si < p.sets.length; si++) {
-        const s = p.sets[si];
-        html += `<div class="plan-set-row">
-          <select data-plan-id="${p.id}" data-set="${si}" data-field="type">
-            ${Object.entries(SET_TYPES).map(([k, v]) => `<option value="${k}" ${k === s.type ? 'selected' : ''}>${v.label}</option>`).join('')}
-          </select>
-          <input type="number" step="0.5" value="${s.weight}" placeholder="kg" data-plan-id="${p.id}" data-set="${si}" data-field="planWeight">
-          <input type="number" value="${s.reps || ''}" placeholder="powt." data-plan-id="${p.id}" data-set="${si}" data-field="planReps">
-          <button class="delete-btn" data-action="delete-plan-set" data-plan-id="${p.id}" data-set="${si}">&#x2715;</button>
+    // Meals
+    html += `<div class="card" style="padding:0;overflow:hidden">`;
+    if (meals.length === 0) {
+      html += `<div class="empty-state" style="padding:32px"><div class="empty-state-text">Brak posilkow</div></div>`;
+    } else {
+      for (const m of meals) {
+        html += `<div class="meal-item">
+          <div><div class="meal-name">${m.name}</div><div class="meal-macros">${m.kcal}kcal &middot; B:${m.protein}g T:${m.fat}g W:${m.carbs}g</div></div>
+          <button class="delete-btn" data-delete-meal="${m.id}">&times;</button>
         </div>`;
       }
-
-      html += `<div style="padding:8px 16px">
-        <button class="btn btn-sm btn-ghost" data-action="add-plan-set" data-plan-id="${p.id}">+ Dodaj serie</button>
-      </div></div>`;
     }
+    html += `</div>`;
 
-    html += `<div style="padding:16px">
-      <select id="new-plan-exercise" class="chart-select">
-        <option value="">Dodaj cwiczenie do planu...</option>
-        ${exercises.map(e => `<option value="${e.id}">${e.name} (${e.muscle})</option>`).join('')}
-      </select>
-      <button class="btn btn-primary" data-action="add-plan-exercise" style="margin-top:8px">Dodaj do planu</button>
-    </div>`;
-
-    html += `<div style="padding:0 16px 16px">
-      <button class="btn btn-secondary" data-action="save-plan">Zapisz zmiany</button>
+    // Add meal form
+    html += `<div class="card"><div class="card-title">Dodaj posilek</div>
+      <div class="add-meal-form">
+        <input type="text" id="meal-name" placeholder="Nazwa">
+        <div class="macro-inputs">
+          <input type="number" id="meal-kcal" placeholder="kcal" inputmode="numeric">
+          <input type="number" id="meal-protein" placeholder="Bialko (g)" inputmode="numeric">
+          <input type="number" id="meal-fat" placeholder="Tluszcz (g)" inputmode="numeric">
+          <input type="number" id="meal-carbs" placeholder="Wegle (g)" inputmode="numeric">
+        </div>
+        <button class="btn btn-primary" data-action="add-meal">Dodaj</button>
+      </div>
     </div>`;
 
     return html;
   }
 
-  // ═══════════════════════════════════════════════════════════════
+  // ════════════════════════════════════════════
+  // SETTINGS
+  // ════════════════════════════════════════════
+  async function renderSettings() {
+    const goal = await getDietGoal();
+    const mcInfo = await getMicrocycleInfo();
+
+    let html = `<div class="header"><h1>Ustawienia</h1></div>`;
+
+    html += `<div class="card"><div class="card-title">Mikrocykl</div>
+      <div class="setting-row"><span class="setting-label">Aktualny tydzien</span><span style="font-weight:800;color:var(--accent)">${mcInfo.weekLabel}</span></div>
+      <div class="setting-row"><span class="setting-label">Reset cyklu</span><button class="btn btn-sm btn-secondary" data-action="reset-cycle">Reset</button></div>
+    </div>`;
+
+    html += `<div class="card"><div class="card-title">Cele diety</div>
+      <div class="setting-row"><span class="setting-label">Kalorie</span><div style="display:flex;gap:6px;align-items:center"><input class="setting-value" type="number" value="${goal.kcal[0]}" data-diet="kcal-min">–<input class="setting-value" type="number" value="${goal.kcal[1]}" data-diet="kcal-max"></div></div>
+      <div class="setting-row"><span class="setting-label">Bialko (g)</span><div style="display:flex;gap:6px;align-items:center"><input class="setting-value" type="number" value="${goal.protein[0]}" data-diet="protein-min">–<input class="setting-value" type="number" value="${goal.protein[1]}" data-diet="protein-max"></div></div>
+      <div class="setting-row"><span class="setting-label">Tluszcz (g)</span><div style="display:flex;gap:6px;align-items:center"><input class="setting-value" type="number" value="${goal.fat[0]}" data-diet="fat-min">–<input class="setting-value" type="number" value="${goal.fat[1]}" data-diet="fat-max"></div></div>
+      <div class="setting-row"><span class="setting-label">Wegle (g)</span><div style="display:flex;gap:6px;align-items:center"><input class="setting-value" type="number" value="${goal.carbs[0]}" data-diet="carbs-min">–<input class="setting-value" type="number" value="${goal.carbs[1]}" data-diet="carbs-max"></div></div>
+      <button class="btn btn-sm btn-primary" data-action="save-diet" style="margin-top:12px">Zapisz</button>
+    </div>`;
+
+    html += `<div class="card"><div class="card-title">Dane</div>
+      <div class="setting-row"><span class="setting-label">Wyczysc wszystko</span><button class="btn btn-sm btn-danger" data-action="clear-all">Reset</button></div>
+    </div>`;
+
+    html += `<div style="text-align:center;padding:20px;font-size:11px;color:var(--text3)">MOSQUITO BOOSTER v3.0<br>AI Coach &middot; FBW A/B Split</div>`;
+
+    return html;
+  }
+
+  // ════════════════════════════════════════════
+  // WORKOUT SUMMARY (post-workout overlay)
+  // ════════════════════════════════════════════
+  function renderSummaryOverlay(data) {
+    const analysis = analyzeWorkoutPerformance(data.exerciseResults);
+    const totalVol = data.totalVolume;
+    const totalSets = data.totalSets;
+    const duration = data.duration;
+    const muscles = data.muscleGroups;
+
+    let html = `<div class="summary-overlay">
+      <div class="summary-content">
+        <div class="summary-header">
+          <span class="summary-icon">${analysis.progressed >= analysis.total * 0.5 ? '&#x1F525;' : analysis.progressed > 0 ? '&#x1F4AA;' : '&#x1F44D;'}</span>
+          <div class="summary-title">Trening zakonczony!</div>
+          <div class="summary-date">${formatDate(today())} &middot; Trening ${data.workoutType}</div>
+        </div>
+
+        <div class="summary-stats">
+          <div class="summary-stat"><div class="summary-stat-value">${duration}</div><div class="summary-stat-label">Minut</div></div>
+          <div class="summary-stat"><div class="summary-stat-value">${totalSets}</div><div class="summary-stat-label">Serii</div></div>
+          <div class="summary-stat"><div class="summary-stat-value">${Math.round(totalVol)}</div><div class="summary-stat-label">Volumen kg</div></div>
+          <div class="summary-stat"><div class="summary-stat-value">${muscles.length}</div><div class="summary-stat-label">Partii</div></div>
+        </div>
+
+        <div class="summary-section">
+          <div class="summary-section-title">Analiza AI</div>`;
+
+    for (const tip of analysis.tips) {
+      html += `<div class="summary-insight">
+        <div class="summary-insight-icon">${tip.icon}</div>
+        <div class="summary-insight-text">${tip.text}</div>
+      </div>`;
+    }
+    html += `</div>`;
+
+    // Per-exercise breakdown
+    html += `<div class="summary-section"><div class="summary-section-title">Cwiczenia</div>`;
+    for (const er of data.exerciseResults) {
+      const color = MUSCLE_COLORS[er.muscle] || '#888';
+      const dirIcon = er.direction === 'up' ? '&#x2B06;' : er.direction === 'down' ? '&#x2B07;' : '&#x2796;';
+      const dirColor = er.direction === 'up' ? 'var(--green)' : er.direction === 'down' ? 'var(--red)' : 'var(--text3)';
+      html += `<div class="summary-exercise">
+        <span class="muscle-badge" style="background:${color}">${er.muscle.slice(0,3)}</span>
+        <div class="summary-ex-info">
+          <div class="summary-ex-name">${er.name}</div>
+          <div class="summary-ex-detail">${er.setsCount}s &middot; Maks: ${er.maxWeight}kg &times; ${er.maxReps} ${er.avgRir != null ? '&middot; RIR ' + er.avgRir.toFixed(1) : ''}</div>
+        </div>
+        <span style="color:${dirColor};font-size:18px">${dirIcon}</span>
+      </div>`;
+    }
+    html += `</div>`;
+
+    // Next workout suggestion
+    html += `<div class="summary-section" style="border-color:rgba(var(--green-rgb),0.15);background:rgba(var(--green-rgb),0.03)">
+      <div class="summary-section-title" style="color:var(--green)">&#x1F4CB; Nastepny trening</div>
+      <div class="summary-insight">
+        <div class="summary-insight-icon">&#x1F4C5;</div>
+        <div class="summary-insight-text">Nastepny: <strong>Trening ${data.workoutType === 'A' ? 'B' : 'A'}</strong><br>
+          <span style="font-size:12px;color:var(--text3)">Zaplanuj za 2-3 dni. Daj cialu odpoczac!</span>
+        </div>
+      </div>
+    </div>`;
+
+    html += `<button class="summary-close-btn" data-action="close-summary">ZAMKNIJ</button>
+      </div>
+    </div>`;
+    return html;
+  }
+
+  // ════════════════════════════════════════════
+  // SWAP MODAL
+  // ════════════════════════════════════════════
+  async function renderSwapModal(exIdx) {
+    const se = activeSession.exercises[exIdx];
+    const exercises = await DB.getAll('exercises');
+    const alternatives = exercises.filter(e => e.muscle === se.muscle && e.id !== se.exerciseId);
+
+    let html = `<div class="swap-modal-overlay" data-action="close-swap">
+      <div class="swap-modal" onclick="event.stopPropagation()">
+        <div class="swap-modal-title">Zamien cwiczenie</div>
+        <div class="swap-modal-subtitle">${se.exerciseName} &middot; ${se.muscle}</div>`;
+
+    for (const alt of alternatives) {
+      const isCurrent = alt.id === se.exerciseId;
+      html += `<div class="swap-option ${isCurrent ? 'current' : ''}" data-swap-to="${alt.id}" data-swap-name="${alt.name}">
+        <span class="swap-option-name">${alt.name}</span>
+        <span class="swap-option-equip">${alt.equipment || ''}</span>
+      </div>`;
+    }
+
+    html += `<div class="swap-custom">
+      <div class="swap-custom-label">Lub wpisz wlasna nazwe:</div>
+      <div class="swap-custom-row">
+        <input class="swap-custom-input" type="text" placeholder="Np. Maszyna przy lustrze" id="custom-swap-name">
+        <button class="btn btn-sm btn-primary" data-action="custom-swap">OK</button>
+      </div>
+    </div>
+    <button class="swap-cancel" data-action="close-swap">Anuluj</button>
+    </div></div>`;
+
+    return html;
+  }
+
+  // ════════════════════════════════════════════
   // EVENTS
-  // ═══════════════════════════════════════════════════════════════
+  // ════════════════════════════════════════════
   function bindEvents() {
     // Nav
-    document.querySelectorAll('[data-nav]').forEach(el => {
+    app.querySelectorAll('[data-nav]').forEach(el => {
       el.addEventListener('click', () => {
         currentScreen = el.dataset.nav;
-        render().then(() => { if (currentScreen === 'charts') drawCharts(); });
-      });
-    });
-
-    // Readiness scale buttons
-    document.querySelectorAll('.readiness-scale .scale-btn').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const field = btn.closest('.readiness-scale').dataset.field;
-        const value = parseInt(btn.dataset.value);
-        if (!preWorkoutData) preWorkoutData = {};
-        preWorkoutData[field] = value;
+        selectedHistorySession = null;
         render();
       });
     });
 
     // Actions
-    document.querySelectorAll('[data-action]').forEach(el => {
-      el.addEventListener('click', async (e) => {
+    app.querySelectorAll('[data-action]').forEach(el => {
+      el.addEventListener('click', async () => {
         const action = el.dataset.action;
 
-        switch (action) {
-          case 'start-readiness':
-            preWorkoutData = { sleep: null, stress: null, soreness: null, notes: '' };
-            currentScreen = 'readiness';
-            render();
-            break;
+        if (action === 'start-workout') {
+          preWorkoutData = { sleep: 3, stress: 3, soreness: 3 };
+          currentScreen = 'readiness';
+          render();
+        }
 
-          case 'back-dashboard':
-            preWorkoutData = null;
-            currentScreen = 'dashboard';
-            render();
-            break;
+        else if (action === 'start-from-readiness') {
+          await startWorkout();
+        }
 
-          case 'start-workout':
-            // Grab notes from readiness if present
-            if (currentScreen === 'readiness') {
-              const notesEl = document.getElementById('readiness-notes');
-              if (notesEl && preWorkoutData) preWorkoutData.notes = notesEl.value;
-            }
-            await startWorkout();
-            break;
+        else if (action === 'skip-workout') {
+          currentScreen = 'dashboard';
+          preWorkoutData = null;
+          render();
+        }
 
-          case 'end-workout':
-            if (confirm('Zakonczyc trening?')) {
-              await endWorkout();
-            }
-            break;
+        else if (action === 'end-workout') {
+          await endWorkout();
+        }
 
-          case 'complete-set':
-            await completeSet(parseInt(el.dataset.ex), parseInt(el.dataset.set));
-            break;
+        else if (action === 'end-workout-confirm') {
+          if (confirm('Zakonczyc trening?')) {
+            await endWorkout();
+          }
+        }
 
-          case 'open-swap':
-            await openSwapModal(parseInt(el.dataset.ex));
-            break;
+        else if (action === 'close-summary') {
+          workoutSummaryData = null;
+          currentScreen = 'dashboard';
+          render();
+        }
 
-          case 'timer-skip':
-            stopTimer();
-            render();
-            break;
+        else if (action === 'back-history') {
+          currentScreen = 'history';
+          selectedHistorySession = null;
+          render();
+        }
 
-          case 'timer-add30':
-            timerSeconds += 30;
-            timerTotal += 30;
-            break;
+        else if (action === 'add-meal') {
+          await addMeal();
+        }
 
-          case 'show-session':
-            selectedHistorySession = parseInt(el.dataset.sessionId);
-            currentScreen = 'history-detail';
-            render();
-            break;
+        else if (action === 'save-diet') {
+          await saveDietGoal();
+        }
 
-          case 'back-history':
-            editingSession = null;
-            currentScreen = 'history';
-            render();
-            break;
-
-          case 'edit-session':
-            editingSession = parseInt(el.dataset.sessionId);
-            render();
-            break;
-
-          case 'save-session-edit':
-            const editInputs = document.querySelectorAll('[data-edit-set-id]');
-            const updates = {};
-            editInputs.forEach(input => {
-              const setId = parseInt(input.dataset.editSetId);
-              if (!updates[setId]) updates[setId] = {};
-              if (input.dataset.editField === 'weight') updates[setId].weight = parseFloat(input.value) || 0;
-              if (input.dataset.editField === 'reps') updates[setId].reps = parseInt(input.value) || 0;
-              if (input.dataset.editField === 'rir') updates[setId].rir = input.value !== '' ? parseInt(input.value) : null;
-            });
-            for (const [setId, vals] of Object.entries(updates)) {
-              const setData = await DB.get('sessionSets', parseInt(setId));
-              if (setData) {
-                if (vals.weight !== undefined) setData.weight = vals.weight;
-                if (vals.reps !== undefined) setData.reps = vals.reps;
-                if (vals.rir !== undefined) setData.rir = vals.rir;
-                await DB.put('sessionSets', setData);
-              }
-            }
-            editingSession = null;
-            showToast('Sesja zaktualizowana');
-            render();
-            break;
-
-          case 'delete-session':
-            if (confirm('Usunac te sesje treningowa?')) {
-              const delSessionId = parseInt(el.dataset.sessionId);
-              const delSets = await DB.getAllByIndex('sessionSets', 'sessionId', delSessionId);
-              for (const ds of delSets) {
-                await DB.delete('sessionSets', ds.id);
-              }
-              const allNotes = await DB.getAll('notes');
-              for (const n of allNotes) {
-                if (n.sessionId === delSessionId) await DB.delete('notes', n.id);
-              }
-              await DB.delete('sessions', delSessionId);
-              selectedHistorySession = null;
-              currentScreen = 'history';
-              showToast('Sesja usunieta');
-              render();
-            }
-            break;
-
-          case 'back-settings':
-            currentScreen = 'settings';
-            render();
-            break;
-
-          case 'add-meal':
-            await addMeal();
-            break;
-
-          case 'delete-meal':
-            await DB.delete('diet', parseInt(el.dataset.mealId));
-            render();
-            break;
-
-          case 'save-rest-time':
-            const rt = parseInt(document.getElementById('rest-time').value) || 180;
-            await DB.put('settings', { key: 'restTime', value: rt });
-            timerTotal = rt;
-            showToast('Czas przerwy zapisany');
-            break;
-
-          case 'reset-microcycle':
+        else if (action === 'reset-cycle') {
+          if (confirm('Resetowac mikrocykl?')) {
             await DB.put('settings', { key: 'microcycle', value: { week: 1, startDate: today() } });
-            showToast('Cykl zresetowany do tygodnia 1');
+            showToast('Mikrocykl zresetowany');
             render();
-            break;
+          }
+        }
 
-          case 'save-diet-goals':
-            await DB.put('settings', {
-              key: 'dietGoal',
-              value: {
-                kcal: [parseInt(document.getElementById('goal-kcal-min').value) || 2400, parseInt(document.getElementById('goal-kcal-max').value) || 2600],
-                protein: [parseInt(document.getElementById('goal-protein-min').value) || 140, parseInt(document.getElementById('goal-protein-max').value) || 160],
-                fat: [60, 90],
-                carbs: [250, 350]
-              }
-            });
-            showToast('Cele dietetyczne zapisane');
-            break;
+        else if (action === 'clear-all') {
+          if (confirm('UWAGA: Usunie wszystkie dane! Kontynuowac?')) {
+            indexedDB.deleteDatabase(DB_NAME);
+            location.reload();
+          }
+        }
 
-          case 'edit-plan':
-            currentScreen = 'plan-editor';
-            render();
-            break;
+        else if (action === 'close-swap') {
+          const overlay = document.querySelector('.swap-modal-overlay');
+          if (overlay) overlay.remove();
+          swapModalExIdx = null;
+        }
 
-          case 'add-plan-exercise':
-            const exSelect = document.getElementById('new-plan-exercise');
-            if (!exSelect.value) return;
-            const exData = await DB.get('exercises', parseInt(exSelect.value));
-            const planAll = await DB.getAll('plan');
-            await DB.add('plan', {
-              exerciseId: exData.id,
-              exerciseName: exData.name,
-              muscle: exData.muscle,
-              sets: [{ type: 'working', weight: 20, reps: 8 }],
-              order: planAll.length
-            });
-            render();
-            break;
+        else if (action === 'custom-swap') {
+          const nameInput = document.getElementById('custom-swap-name');
+          if (nameInput && nameInput.value.trim()) {
+            await doCustomSwap(swapModalExIdx, nameInput.value.trim());
+          }
+        }
 
-          case 'delete-plan-exercise':
-            await DB.delete('plan', parseInt(el.dataset.planId));
-            render();
-            break;
-
-          case 'add-plan-set':
-            const p = await DB.get('plan', parseInt(el.dataset.planId));
-            p.sets.push({ type: 'working', weight: p.sets[p.sets.length - 1]?.weight || 20, reps: 8 });
-            await DB.put('plan', p);
-            render();
-            break;
-
-          case 'delete-plan-set':
-            const pl = await DB.get('plan', parseInt(el.dataset.planId));
-            pl.sets.splice(parseInt(el.dataset.set), 1);
-            await DB.put('plan', pl);
-            render();
-            break;
-
-          case 'save-plan':
-            const planItems = await DB.getAll('plan');
-            for (const item of planItems) {
-              const inputs = document.querySelectorAll(`[data-plan-id="${item.id}"]`);
-              inputs.forEach(input => {
-                if (input.dataset.set !== undefined && input.dataset.field) {
-                  const si = parseInt(input.dataset.set);
-                  if (input.dataset.field === 'type') item.sets[si].type = input.value;
-                  if (input.dataset.field === 'planWeight') item.sets[si].weight = parseFloat(input.value) || 0;
-                  if (input.dataset.field === 'planReps') item.sets[si].reps = parseInt(input.value) || null;
-                }
-              });
-              await DB.put('plan', item);
-            }
-            showToast('Plan zapisany');
-            break;
-
-          case 'add-exercise-form':
-            const area = document.getElementById('add-exercise-area');
-            if (area) {
-              area.innerHTML = `
-                <div style="padding:12px 0; display:flex; flex-direction:column; gap:8px;">
-                  <input type="text" id="new-ex-name" placeholder="Nazwa cwiczenia" class="swap-custom-input">
-                  <select id="new-ex-muscle" class="chart-select">
-                    ${Object.keys(MUSCLE_COLORS).map(m => `<option value="${m}">${m}</option>`).join('')}
-                  </select>
-                  <input type="text" id="new-ex-equip" placeholder="Sprzet (np. maszyna, hantle)" class="swap-custom-input">
-                  <button class="btn btn-primary btn-sm" id="save-new-exercise">Zapisz</button>
-                </div>`;
-              document.getElementById('save-new-exercise').addEventListener('click', async () => {
-                const name = document.getElementById('new-ex-name').value.trim();
-                const muscle = document.getElementById('new-ex-muscle').value;
-                const equipment = document.getElementById('new-ex-equip').value.trim();
-                if (!name) return;
-                await DB.add('exercises', { name, muscle, equipment });
-                showToast(`Dodano: ${name}`);
-                render();
-              });
-            }
-            break;
+        else if (action === 'change-chart') {
+          // handled by select event
         }
       });
     });
 
-    // Chart select change
-    const chartSelect = document.querySelector('[data-action="chart-select"]');
+    // Chart select
+    const chartSelect = app.querySelector('.chart-select');
     if (chartSelect) {
-      chartSelect.addEventListener('change', (e) => {
-        chartExercise = parseInt(e.target.value);
-        drawCharts();
+      chartSelect.addEventListener('change', () => {
+        chartExercise = parseInt(chartSelect.value);
+        drawChart(chartExercise);
       });
     }
 
-    // Input changes during workout
-    document.querySelectorAll('.set-input').forEach(input => {
-      input.addEventListener('input', (e) => {
-        if (!activeSession) return;
-        const exI = parseInt(e.target.dataset.ex);
-        const setI = parseInt(e.target.dataset.set);
-        const field = e.target.dataset.field;
-        if (isNaN(exI) || isNaN(setI)) return;
-        const val = parseFloat(e.target.value) || 0;
-        if (field === 'weight') activeSession.exercises[exI].sets[setI].actualWeight = val;
-        if (field === 'reps') activeSession.exercises[exI].sets[setI].actualReps = val;
+    // Session items
+    app.querySelectorAll('[data-session]').forEach(el => {
+      el.addEventListener('click', () => {
+        selectedHistorySession = parseInt(el.dataset.session);
+        currentScreen = 'history-detail';
+        render();
       });
     });
 
-    // RIR select changes during workout
-    document.querySelectorAll('.rir-select').forEach(select => {
-      select.addEventListener('change', (e) => {
-        if (!activeSession) return;
-        const exI = parseInt(e.target.dataset.ex);
-        const setI = parseInt(e.target.dataset.set);
-        if (isNaN(exI) || isNaN(setI)) return;
-        activeSession.exercises[exI].sets[setI].rir = e.target.value !== '' ? parseInt(e.target.value) : null;
+    // Delete meal
+    app.querySelectorAll('[data-delete-meal]').forEach(el => {
+      el.addEventListener('click', async () => {
+        await DB.delete('diet', parseInt(el.dataset.deleteMeal));
+        render();
       });
     });
 
-    // Note changes
-    document.querySelectorAll('[data-note]').forEach(textarea => {
-      textarea.addEventListener('input', (e) => {
-        if (!activeSession) return;
-        const exI = parseInt(e.target.dataset.ex);
-        activeSession.exercises[exI].note = e.target.value;
+    // Swap buttons
+    app.querySelectorAll('[data-swap]').forEach(el => {
+      el.addEventListener('click', async () => {
+        swapModalExIdx = parseInt(el.dataset.swap);
+        const modalHtml = await renderSwapModal(swapModalExIdx);
+        const div = document.createElement('div');
+        div.innerHTML = modalHtml;
+        document.body.appendChild(div.firstElementChild);
+        bindSwapModalEvents();
       });
     });
+
+    // Set confirm buttons
+    app.querySelectorAll('[data-confirm]').forEach(el => {
+      el.addEventListener('click', async () => {
+        const exIdx = parseInt(el.dataset.confirm);
+        const setNum = parseInt(el.dataset.set);
+        await confirmSet(exIdx, setNum);
+      });
+    });
+
+    // Set inputs (auto-save on change)
+    app.querySelectorAll('.set-input, .rir-select').forEach(el => {
+      el.addEventListener('change', () => {
+        // Values saved on confirm
+      });
+    });
+
+    // Readiness scale buttons
+    app.querySelectorAll('[data-readiness]').forEach(el => {
+      el.addEventListener('click', () => {
+        const key = el.dataset.readiness;
+        const val = parseInt(el.dataset.val);
+        if (preWorkoutData) {
+          preWorkoutData[key] = val;
+          render();
+        }
+      });
+    });
+
+    // Note inputs
+    app.querySelectorAll('.note-input').forEach(el => {
+      // Load existing note
+      const exId = parseInt(el.dataset.noteEx);
+      if (activeSession) {
+        DB.getAll('notes').then(notes => {
+          const existing = notes.find(n => n.sessionId === activeSession.id && n.exerciseId === exId);
+          if (existing) el.value = existing.text;
+        });
+      }
+    });
+
+    // Timer events
+    document.addEventListener('stopTimer', () => { stopTimer(); render(); });
+    document.addEventListener('addTimer', (e) => { timerSeconds += e.detail; timerTotal += e.detail; });
+  }
+
+  function bindSwapModalEvents() {
+    document.querySelectorAll('.swap-modal-overlay [data-swap-to]').forEach(el => {
+      el.addEventListener('click', async () => {
+        const newExId = parseInt(el.dataset.swapTo);
+        const newExName = el.dataset.swapName;
+        await doSwap(swapModalExIdx, newExId, newExName);
+      });
+    });
+
+    document.querySelectorAll('.swap-modal-overlay [data-action="close-swap"]').forEach(el => {
+      el.addEventListener('click', () => {
+        const overlay = document.querySelector('.swap-modal-overlay');
+        if (overlay) overlay.remove();
+        swapModalExIdx = null;
+      });
+    });
+
+    document.querySelectorAll('.swap-modal-overlay [data-action="custom-swap"]').forEach(el => {
+      el.addEventListener('click', async () => {
+        const nameInput = document.getElementById('custom-swap-name');
+        if (nameInput && nameInput.value.trim()) {
+          await doCustomSwap(swapModalExIdx, nameInput.value.trim());
+        }
+      });
+    });
+  }
+
+  // ════════════════════════════════════════════
+  // WORKOUT ACTIONS
+  // ════════════════════════════════════════════
+
+  async function startWorkout() {
+    const nextType = await getNextWorkoutType();
+    const plan = await DB.getAll('plan');
+    const planForType = plan.filter(p => p.workout === nextType).sort((a, b) => a.order - b.order);
+    const mcInfo = await getMicrocycleInfo();
+
+    // Create session
+    const sessionId = await DB.add('sessions', {
+      date: today(),
+      workoutType: nextType,
+      startTime: Date.now(),
+      completed: false,
+      readiness: preWorkoutData ? calculateReadiness(preWorkoutData) : 3,
+      readinessData: preWorkoutData
+    });
+
+    const exercises = planForType.map(p => ({
+      exerciseId: p.exerciseId,
+      exerciseName: p.exerciseName,
+      muscle: p.muscle,
+      exerciseType: p.exerciseType
+    }));
+
+    activeSession = await DB.get('sessions', sessionId);
+    activeSession.exercises = exercises;
+    await DB.put('sessions', activeSession);
+
+    currentScreen = 'workout';
+    lastSetTime = null;
+    preWorkoutData = null;
+    render();
+  }
+
+  async function confirmSet(exIdx, setNum) {
+    const se = activeSession.exercises[exIdx];
+    const row = app.querySelector(`.set-row .set-check[data-confirm="${exIdx}"][data-set="${setNum}"]`)?.closest('.set-row');
+    if (!row) return;
+
+    const weightInput = row.querySelector('[data-field="weight"]');
+    const repsInput = row.querySelector('[data-field="reps"]');
+    const rirSelect = row.querySelector('[data-field="rir"]');
+
+    const weight = parseFloat(weightInput?.value) || 0;
+    const reps = parseInt(repsInput?.value) || 0;
+    const rir = rirSelect?.value !== '' ? parseInt(rirSelect.value) : null;
+
+    if (weight <= 0 || reps <= 0) {
+      showToast('Wpisz ciezar i powtorzenia!', 'warning');
+      return;
+    }
+
+    // Check if set already exists
+    const allSets = await DB.getAllByIndex('sessionSets', 'sessionId', activeSession.id);
+    const existing = allSets.find(s => s.exerciseId === se.exerciseId && s.setNum === setNum);
+
+    if (existing && existing.completed) return; // Already done
+
+    const setData = {
+      sessionId: activeSession.id,
+      exerciseId: se.exerciseId,
+      setNum,
+      weight,
+      reps,
+      rir,
+      completed: true,
+      timestamp: Date.now()
+    };
+
+    if (existing) {
+      setData.id = existing.id;
+      await DB.put('sessionSets', setData);
+    } else {
+      await DB.add('sessionSets', setData);
+    }
+
+    // Auto-track rest time
+    if (lastSetTime) {
+      const restSec = Math.floor((Date.now() - lastSetTime) / 1000);
+      if (restSec > 10 && restSec < 600) {
+        // Could store rest times for analysis
+      }
+    }
+    lastSetTime = Date.now();
+
+    // Start rest timer based on exercise type
+    const cls = getExerciseClass({ type: se.exerciseType, muscle: se.muscle });
+    startTimer(cls.restTime);
+
+    // RIR feedback
+    if (rir === 0) {
+      showToast('RIR 0 - porazka! Nastepnym razem utrzymaj ciezar.', 'warning');
+    } else if (rir !== null && rir <= 1) {
+      showToast(`Seria ${setNum + 1} &#x2713; &middot; RIR ${rir} - blisko limitu!`, 'progress');
+    } else {
+      showToast(`Seria ${setNum + 1} &#x2713; &middot; ${weight}kg &times; ${reps}`, 'progress');
+    }
+
+    render();
+  }
+
+  async function endWorkout() {
+    if (!activeSession) return;
+
+    const allSets = await DB.getAllByIndex('sessionSets', 'sessionId', activeSession.id);
+    const completedSets = allSets.filter(s => s.completed);
+
+    if (completedSets.length === 0) {
+      if (confirm('Brak zalogowanych serii. Usunac trening?')) {
+        await DB.delete('sessions', activeSession.id);
+        activeSession = null;
+        stopTimer();
+        currentScreen = 'dashboard';
+        render();
+      }
+      return;
+    }
+
+    // Save notes
+    const noteInputs = app.querySelectorAll('.note-input');
+    for (const el of noteInputs) {
+      const exId = parseInt(el.dataset.noteEx);
+      const text = el.value.trim();
+      if (text) {
+        const existing = (await DB.getAll('notes')).find(n => n.sessionId === activeSession.id && n.exerciseId === exId);
+        if (existing) {
+          existing.text = text;
+          await DB.put('notes', existing);
+        } else {
+          await DB.add('notes', { sessionId: activeSession.id, exerciseId: exId, text });
+        }
+      }
+    }
+
+    // Calculate duration
+    const duration = activeSession.startTime ? Math.round((Date.now() - activeSession.startTime) / 60000) : 0;
+    activeSession.completed = true;
+    activeSession.duration = duration;
+    await DB.put('sessions', activeSession);
+
+    // Build summary
+    const exercises = await DB.getAll('exercises');
+    const exMap = {};
+    exercises.forEach(e => { exMap[e.id] = e; });
+
+    const exerciseResults = [];
+    const muscleGroups = new Set();
+    let totalVolume = 0;
+
+    for (const se of activeSession.exercises) {
+      const exSets = completedSets.filter(s => s.exerciseId === se.exerciseId);
+      if (exSets.length === 0) continue;
+
+      const maxWeight = Math.max(...exSets.map(s => s.weight));
+      const maxReps = Math.max(...exSets.filter(s => s.weight === maxWeight).map(s => s.reps));
+      const rirs = exSets.filter(s => s.rir != null).map(s => s.rir);
+      const avgRir = rirs.length > 0 ? rirs.reduce((a, b) => a + b, 0) / rirs.length : null;
+      const vol = exSets.reduce((sum, s) => sum + s.weight * s.reps, 0);
+      totalVolume += vol;
+      muscleGroups.add(se.muscle);
+
+      // Determine direction vs previous
+      const prevSets = await getPrevSessionSets(se.exerciseId);
+      let direction = 'maintain';
+      if (prevSets.length > 0) {
+        const prevVol = prevSets.reduce((sum, s) => sum + s.weight * s.reps, 0);
+        if (vol > prevVol * 1.02) direction = 'up';
+        else if (vol < prevVol * 0.95) direction = 'down';
+      }
+
+      exerciseResults.push({
+        name: se.exerciseName,
+        muscle: se.muscle,
+        setsCount: exSets.length,
+        maxWeight,
+        maxReps,
+        avgRir,
+        volume: vol,
+        direction
+      });
+    }
+
+    workoutSummaryData = {
+      workoutType: activeSession.workoutType,
+      duration,
+      totalSets: completedSets.length,
+      totalVolume,
+      muscleGroups: [...muscleGroups],
+      exerciseResults
+    };
+
+    stopTimer();
+    activeSession = null;
+
+    // Show summary overlay
+    const overlay = document.createElement('div');
+    overlay.innerHTML = renderSummaryOverlay(workoutSummaryData);
+    document.body.appendChild(overlay.firstElementChild);
+
+    // Bind close
+    document.querySelector('.summary-close-btn')?.addEventListener('click', () => {
+      document.querySelector('.summary-overlay')?.remove();
+      workoutSummaryData = null;
+      currentScreen = 'dashboard';
+      render();
+    });
+  }
+
+  async function doSwap(exIdx, newExId, newExName) {
+    const overlay = document.querySelector('.swap-modal-overlay');
+    if (overlay) overlay.remove();
+
+    const ex = await DB.get('exercises', newExId);
+    activeSession.exercises[exIdx] = {
+      exerciseId: newExId,
+      exerciseName: newExName,
+      muscle: ex ? ex.muscle : activeSession.exercises[exIdx].muscle,
+      exerciseType: ex ? ex.type : activeSession.exercises[exIdx].exerciseType
+    };
+    await DB.put('sessions', activeSession);
+    swapModalExIdx = null;
+    showToast(`Zamieniono na: ${newExName}`);
+    render();
+  }
+
+  async function doCustomSwap(exIdx, customName) {
+    const overlay = document.querySelector('.swap-modal-overlay');
+    if (overlay) overlay.remove();
+
+    const oldEx = activeSession.exercises[exIdx];
+    // Create new exercise in DB
+    const newId = await DB.add('exercises', {
+      name: customName,
+      muscle: oldEx.muscle,
+      equipment: 'custom',
+      type: oldEx.exerciseType,
+      workout: null,
+      order: 99
+    });
+
+    activeSession.exercises[exIdx] = {
+      exerciseId: newId,
+      exerciseName: customName,
+      muscle: oldEx.muscle,
+      exerciseType: oldEx.exerciseType
+    };
+    await DB.put('sessions', activeSession);
+    swapModalExIdx = null;
+    showToast(`Dodano: ${customName}`);
+    render();
   }
 
   async function addMeal() {
@@ -1740,24 +1382,27 @@
     const fat = parseInt(document.getElementById('meal-fat')?.value) || 0;
     const carbs = parseInt(document.getElementById('meal-carbs')?.value) || 0;
 
-    if (!name) {
-      showToast('Podaj nazwe posilku', 'warning');
-      return;
-    }
+    if (!name) { showToast('Wpisz nazwe posilku', 'warning'); return; }
 
-    await DB.add('diet', {
-      date: today(),
-      name,
-      kcal,
-      protein,
-      fat,
-      carbs,
-      time: new Date().toTimeString().slice(0, 5)
-    });
-
+    await DB.add('diet', { date: today(), name, kcal, protein, fat, carbs, time: new Date().toISOString() });
+    showToast(`Dodano: ${name}`);
     render();
   }
 
-  // Initial render
+  async function saveDietGoal() {
+    const getVal = (sel) => parseInt(app.querySelector(`[data-diet="${sel}"]`)?.value) || 0;
+    const goal = {
+      kcal: [getVal('kcal-min'), getVal('kcal-max')],
+      protein: [getVal('protein-min'), getVal('protein-max')],
+      fat: [getVal('fat-min'), getVal('fat-max')],
+      carbs: [getVal('carbs-min'), getVal('carbs-max')]
+    };
+    await DB.put('settings', { key: 'dietGoal', value: goal });
+    showToast('Cele diety zapisane!');
+  }
+
+  // ════════════════════════════════════════════
+  // INITIAL RENDER
+  // ════════════════════════════════════════════
   render();
 })();
